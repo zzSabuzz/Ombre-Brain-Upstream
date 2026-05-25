@@ -905,6 +905,14 @@ source=deleted
 
 ## 维护命令
 
+这些脚本默认在仓库根目录运行。VPS/Linux 直接用 `bash`；Windows 本地测试可用 Git Bash。常用环境变量：
+
+- `COMPOSE_FILE`：指定 compose 文件，VPS 常用 `compose.hk.yml`，普通用户部署常用 `docker-compose.user.yml`。不填时会按 `compose.hk.yml` → `docker-compose.user.yml` → `docker-compose.yml` 自动找。
+- `OMBRE_SERVICE`：容器服务名，默认 `ombre-brain`。
+- `BATCH_SIZE`：embedding 每批处理数量，默认 `20`。
+- `HEALTH_URL`：健康检查地址，不填时 `compose.hk.yml` 默认查 `http://127.0.0.1:18001/health`，用户版 compose 默认查 `http://127.0.0.1:8000/health`。
+- `YES=1`：跳过重建 embedding 的确认提示；清理孤儿 embedding 仍建议手动确认。
+
 ```bash
 # 一键更新：拉代码、重建/更新容器、健康检查
 COMPOSE_FILE=compose.hk.yml bash scripts/update_deploy.sh
@@ -937,6 +945,13 @@ COMPOSE_FILE=compose.hk.yml bash scripts/embedding_cleanup_orphans.sh
 docker compose -f compose.hk.yml exec -T ombre-brain python scripts/cleanup_migrated_feel_buckets.py
 docker compose -f compose.hk.yml exec -T ombre-brain python scripts/cleanup_migrated_feel_buckets.py --apply
 ```
+
+脚本用途：
+
+- `scripts/update_deploy.sh`：适合“我只想更新到最新版”。它会 `git pull --ff-only`，如果 compose 里是 `build:` 就重建镜像，否则先 pull 镜像，再启动容器，最后做健康检查。
+- `scripts/embedding_backfill.sh`：只补缺失的 embedding，适合升级后发现部分记忆没有语义召回。
+- `scripts/embedding_rebuild.sh`：重建全部 embedding，适合 embedding 模型、base_url 或 embedding 文本格式改过之后使用。它会消耗更多 API 次数。
+- `scripts/embedding_cleanup_orphans.sh`：检查 `embeddings.db` 里已经没有对应 bucket 文件的记录，并要求输入确认后删除。
 
 ## 本地开发与测试
 
