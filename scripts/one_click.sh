@@ -1207,11 +1207,23 @@ migration_plan_feels() {
   mapping="$(migration_mapping_path)"
   review="$(migration_review_path)"
   plan_json="${state_dir}/feel_comment_backfill_plan.json"
-  run_target_shell "mkdir -p '${state_dir}' && python scripts/plan_feel_comment_backfill.py --limit '${limit}' --top 3 --min-overlap 2 --mapping-template '${mapping}' --review-markdown '${review}' > '${plan_json}'" || return 1
+  run_target_shell "mkdir -p '${state_dir}' && PYTHONIOENCODING=utf-8 python scripts/plan_feel_comment_backfill.py --limit '${limit}' --top 3 --min-overlap 2 --mapping-template '${mapping}' --review-markdown '${review}' > '${plan_json}'" || return 1
   printf '已生成审阅表：%s\n' "${review}"
   printf '已生成 mapping 模板：%s\n' "${mapping}"
   printf '完整候选 JSON：%s\n' "${plan_json}"
   printf '请先人工编辑 mapping，把确认的 suggested_source_bucket_id 复制到 source_bucket_id。\n'
+}
+
+migration_review_feels_interactive() {
+  migration_prepare_target "逐条确认旧 feel mapping" || return 1
+  local state_dir mapping plan_json
+  state_dir="$(migration_state_dir)"
+  mapping="$(migration_mapping_path)"
+  plan_json="${state_dir}/feel_comment_backfill_plan.json"
+  printf '接下来会逐条列出旧 feel 和候选源记忆。\n'
+  printf '输入 y 接受第 1 个候选；输入 n 可自己填源记忆 bucket_id。\n'
+  run_target_shell "PYTHONIOENCODING=utf-8 python scripts/review_feel_comment_backfill.py --plan '${plan_json}' --mapping '${mapping}'" || return 1
+  printf '已更新 mapping：%s\n' "${mapping}"
 }
 
 migration_apply_feels_dry_run() {
@@ -1224,7 +1236,7 @@ migration_apply_feels_dry_run() {
     return 1
   fi
   output="${state_dir}/feel_comment_backfill_apply_dry_run.json"
-  run_target_shell "python scripts/apply_feel_comment_backfill.py --mapping '${mapping}' > '${output}'" || return 1
+  run_target_shell "PYTHONIOENCODING=utf-8 python scripts/apply_feel_comment_backfill.py --mapping '${mapping}' > '${output}'" || return 1
   printf '预演结果：%s\n' "${output}"
 }
 
@@ -1242,7 +1254,7 @@ migration_apply_feels() {
     return 0
   fi
   output="${state_dir}/feel_comment_backfill_apply.json"
-  run_target_shell "python scripts/apply_feel_comment_backfill.py --mapping '${mapping}' --apply --archive-feel --refresh-embeddings > '${output}'" || return 1
+  run_target_shell "PYTHONIOENCODING=utf-8 python scripts/apply_feel_comment_backfill.py --mapping '${mapping}' --apply --archive-feel --refresh-embeddings > '${output}'" || return 1
   printf '写入结果：%s\n' "${output}"
 }
 
@@ -1263,7 +1275,7 @@ migration_cleanup_feels_dry_run() {
   local state_dir output
   state_dir="$(migration_state_dir)"
   output="${state_dir}/cleanup_migrated_feel_buckets_dry_run.json"
-  run_target_shell "python scripts/cleanup_migrated_feel_buckets.py > '${output}'" || return 1
+  run_target_shell "PYTHONIOENCODING=utf-8 python scripts/cleanup_migrated_feel_buckets.py > '${output}'" || return 1
   printf '清理预演结果：%s\n' "${output}"
 }
 
@@ -1276,7 +1288,7 @@ migration_cleanup_feels_apply() {
     return 0
   fi
   output="${state_dir}/cleanup_migrated_feel_buckets_apply.json"
-  run_target_shell "python scripts/cleanup_migrated_feel_buckets.py --apply > '${output}'" || return 1
+  run_target_shell "PYTHONIOENCODING=utf-8 python scripts/cleanup_migrated_feel_buckets.py --apply > '${output}'" || return 1
   printf '清理结果：%s\n' "${output}"
 }
 
@@ -1289,13 +1301,14 @@ migration_menu() {
     printf '2. 备份 buckets/state\n'
     printf '3. 生成新版 config/env（走首次部署向导）\n'
     printf '4. 生成旧 feel 审阅表和 mapping\n'
-    printf '5. 预演已确认 mapping 写入年轮\n'
-    printf '6. 应用已确认 mapping 写入年轮\n'
-    printf '7. 迁移后重建向量库\n'
-    printf '8. 预演清理已迁移旧 feel\n'
-    printf '9. 删除已迁移旧 feel\n'
+    printf '5. 逐条确认旧 feel mapping\n'
+    printf '6. 预演已确认 mapping 写入年轮\n'
+    printf '7. 应用已确认 mapping 写入年轮\n'
+    printf '8. 迁移后重建向量库\n'
+    printf '9. 预演清理已迁移旧 feel\n'
+    printf '10. 删除已迁移旧 feel\n'
     printf '0. 返回上一级\n'
-    if ! read -r -p '输入（0-9）：' choice; then
+    if ! read -r -p '输入（0-10）：' choice; then
       printf '\n'
       return 0
     fi
@@ -1304,13 +1317,14 @@ migration_menu() {
       2) migration_backup; pause ;;
       3) first_deploy; pause ;;
       4) migration_plan_feels; pause ;;
-      5) migration_apply_feels_dry_run; pause ;;
-      6) migration_apply_feels; pause ;;
-      7) migration_rebuild_embeddings; pause ;;
-      8) migration_cleanup_feels_dry_run; pause ;;
-      9) migration_cleanup_feels_apply; pause ;;
+      5) migration_review_feels_interactive; pause ;;
+      6) migration_apply_feels_dry_run; pause ;;
+      7) migration_apply_feels; pause ;;
+      8) migration_rebuild_embeddings; pause ;;
+      9) migration_cleanup_feels_dry_run; pause ;;
+      10) migration_cleanup_feels_apply; pause ;;
       0) return 0 ;;
-      *) printf '请输入 0-9。\n' ;;
+      *) printf '请输入 0-10。\n' ;;
     esac
   done
 }
