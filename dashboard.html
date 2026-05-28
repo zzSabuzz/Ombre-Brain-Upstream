@@ -2279,7 +2279,7 @@ function closeDetail() {
 }
 
 var networkData = null;
-var NETWORK_NODE_RADIUS = 9;
+var NETWORK_NODE_RADIUS = 6;
 var networkState = {
   canvas: null,
   ctx: null,
@@ -2345,10 +2345,10 @@ function buildNetworkPositions(W, H, data) {
   if (!nodes.length) return positions;
 
   var cx = W / 2, cy = H / 2;
-  var marginX = Math.max(64, W * 0.08);
-  var marginY = Math.max(48, H * 0.10);
-  var rx = Math.max(120, (W - marginX * 2) * 0.46);
-  var ry = Math.max(100, (H - marginY * 2) * 0.43);
+  var marginX = Math.max(42, W * 0.045);
+  var marginY = Math.max(34, H * 0.065);
+  var rx = Math.max(140, (W - marginX * 2) * 0.49);
+  var ry = Math.max(120, (H - marginY * 2) * 0.47);
   nodes.forEach(function(n, i) {
     var angle = (i / nodes.length) * Math.PI * 2;
     var jitter = ((i * 37) % 23) - 11;
@@ -2364,7 +2364,7 @@ function buildNetworkPositions(W, H, data) {
         var a = positions[nodes[i].id], b = positions[nodes[j].id];
         var dx = b.x - a.x, dy = b.y - a.y;
         var dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
-        var force = 1500 / (dist * dist);
+        var force = 2400 / (dist * dist);
         dx = (dx / dist) * force;
         dy = (dy / dist) * force;
         a.x -= dx; a.y -= dy;
@@ -2376,7 +2376,7 @@ function buildNetworkPositions(W, H, data) {
       if (!a || !b) return;
       var dx = b.x - a.x, dy = b.y - a.y;
       var dist = Math.sqrt(dx*dx + dy*dy);
-      var ideal = e.kind === 'memory_edge' ? 180 : 150;
+      var ideal = e.kind === 'memory_edge' ? 230 : 200;
       var force = (dist - ideal) * 0.006 * (e.similarity || 0.5);
       dx = (dx / Math.max(1,dist)) * force;
       dy = (dy / Math.max(1,dist)) * force;
@@ -2385,8 +2385,8 @@ function buildNetworkPositions(W, H, data) {
     });
     nodes.forEach(function(n) {
       var p = positions[n.id];
-      p.x += (cx - p.x) * 0.0025;
-      p.y += (cy - p.y) * 0.0025;
+      p.x += (cx - p.x) * 0.0016;
+      p.y += (cy - p.y) * 0.0016;
       p.x = Math.max(marginX, Math.min(W - marginX, p.x));
       p.y = Math.max(marginY, Math.min(H - marginY, p.y));
     });
@@ -2471,7 +2471,7 @@ function drawNetworkFrame(time) {
     var color = colors[n.type] || '#2F4F4F';
     var isSelected = networkState.selectedId === n.id;
     var isDragging = networkState.drag && networkState.drag.type === 'node' && networkState.drag.node.id === n.id;
-    var breath = isDragging ? 1.1 : 2.6 + Math.sin(time / 900 + i * 0.72) * 1.7;
+    var breath = isDragging ? 0.8 : 2.1 + Math.sin(time / 900 + i * 0.72) * 1.35;
 
     ctx.beginPath();
     ctx.arc(p.x, p.y, r + 5 + breath, 0, Math.PI * 2);
@@ -2545,7 +2545,7 @@ function findNetworkNodeAt(point) {
     var dx = point.x - (p.x + view.x);
     var dy = point.y - (p.y + view.y);
     var dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist <= NETWORK_NODE_RADIUS + 9 && dist < bestDist) {
+    if (dist <= NETWORK_NODE_RADIUS + 11 && dist < bestDist) {
       best = n;
       bestDist = dist;
     }
