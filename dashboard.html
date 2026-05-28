@@ -555,13 +555,57 @@
     box-shadow: inset 3px 3px 6px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light);
   }
 
+  .network-stage {
+    position: relative;
+  }
   #network-canvas {
+    display: block;
     width: 100%;
     height: calc(100vh - 180px);
     background: var(--bg);
     border-radius: 20px;
     border: 1px solid var(--border);
     box-shadow: inset 4px 4px 10px var(--shadow-dark-subtle), inset -4px -4px 10px var(--shadow-light);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+  #network-canvas.dragging {
+    cursor: grabbing;
+  }
+  .network-popover {
+    position: absolute;
+    width: min(320px, calc(100% - 24px));
+    padding: 14px 16px 15px;
+    border: 1px solid rgba(160, 140, 110, 0.28);
+    border-radius: 16px;
+    background: rgba(253, 252, 240, 0.94);
+    color: var(--text);
+    box-shadow: 10px 12px 28px rgba(120, 101, 72, 0.18), -4px -4px 12px rgba(255, 252, 240, 0.62);
+    backdrop-filter: blur(10px);
+    z-index: 3;
+  }
+  .network-popover[hidden] {
+    display: none;
+  }
+  .network-popover-title {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--accent);
+  }
+  .network-popover-meta {
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--text-light);
+  }
+  .network-popover-body {
+    margin-top: 10px;
+    max-height: 126px;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--text-dim);
   }
   .network-legend {
     display: flex;
@@ -1363,7 +1407,10 @@
     <div class="legend-item"><span class="legend-dot" style="background:#8B6A6A"></span> feel</div>
     <div class="legend-item"><span class="legend-dot" style="background:#B0A590"></span> archived</div>
   </div>
-  <canvas id="network-canvas"></canvas>
+  <div class="network-stage">
+    <canvas id="network-canvas"></canvas>
+    <div id="network-popover" class="network-popover" hidden></div>
+  </div>
 </div>
 
 <div class="content" id="import-view" style="display:none">
@@ -2232,14 +2279,33 @@ function closeDetail() {
 }
 
 var networkData = null;
+var NETWORK_NODE_RADIUS = 9;
+var networkState = {
+  canvas: null,
+  ctx: null,
+  width: 0,
+  height: 0,
+  data: null,
+  positions: {},
+  edgeMap: {},
+  view: { x: 0, y: 0 },
+  drag: null,
+  selectedId: '',
+  animationFrame: 0,
+  popoverToken: 0,
+};
+
 async function loadNetwork() {
   var canvas = document.getElementById('network-canvas');
   var ctx = canvas.getContext('2d');
-  canvas.width = canvas.offsetWidth * window.devicePixelRatio;
-  canvas.height = canvas.offsetHeight * window.devicePixelRatio;
-  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  var dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(canvas.offsetWidth * dpr));
+  canvas.height = Math.max(1, Math.floor(canvas.offsetHeight * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   var W = canvas.offsetWidth, H = canvas.offsetHeight;
 
+  stopNetworkAnimation();
+  hideNetworkPopover();
   ctx.fillStyle = '#FDFCF0';
   ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = '#8A8070';
@@ -2251,21 +2317,33 @@ async function loadNetwork() {
     var res = await authFetch(BASE + '/api/network');
     if (!res) return;
     networkData = await res.json();
-    drawNetwork(ctx, W, H, networkData);
+    initNetworkCanvas(canvas, ctx, W, H, networkData);
   } catch(e) {
     ctx.fillText('加载失败: ' + e.message, W/2, H/2 + 24);
   }
 }
 
-function drawNetwork(ctx, W, H, data) {
-  var nodes = data.nodes, edges = data.edges;
-  if (!nodes.length) {
-    ctx.fillStyle = '#8A8070';
-    ctx.fillText('没有记忆桶', W/2, H/2);
-    return;
-  }
+function initNetworkCanvas(canvas, ctx, W, H, data) {
+  networkState.canvas = canvas;
+  networkState.ctx = ctx;
+  networkState.width = W;
+  networkState.height = H;
+  networkState.data = data || { nodes: [], edges: [] };
+  networkState.positions = buildNetworkPositions(W, H, networkState.data);
+  networkState.edgeMap = buildNetworkEdgeMap(networkState.data.edges || []);
+  networkState.view = { x: 0, y: 0 };
+  networkState.drag = null;
+  networkState.selectedId = '';
+  bindNetworkCanvas(canvas);
+  startNetworkAnimation();
+}
 
+function buildNetworkPositions(W, H, data) {
+  var nodes = data.nodes || [];
+  var edges = data.edges || [];
   var positions = {};
+  if (!nodes.length) return positions;
+
   var cx = W / 2, cy = H / 2;
   var marginX = Math.max(64, W * 0.08);
   var marginY = Math.max(48, H * 0.10);
@@ -2278,14 +2356,6 @@ function drawNetwork(ctx, W, H, data) {
       x: cx + Math.cos(angle) * rx + jitter * 2.5,
       y: cy + Math.sin(angle) * ry + jitter * 1.8,
     };
-  });
-
-  var edgeMap = {};
-  edges.forEach(function(e) {
-    if (!edgeMap[e.source]) edgeMap[e.source] = [];
-    if (!edgeMap[e.target]) edgeMap[e.target] = [];
-    edgeMap[e.source].push(e.target);
-    edgeMap[e.target].push(e.source);
   });
 
   for (var iter = 0; iter < 80; iter++) {
@@ -2321,44 +2391,101 @@ function drawNetwork(ctx, W, H, data) {
       p.y = Math.max(marginY, Math.min(H - marginY, p.y));
     });
   }
+  return positions;
+}
+
+function buildNetworkEdgeMap(edges) {
+  var edgeMap = {};
+  edges.forEach(function(e) {
+    if (!edgeMap[e.source]) edgeMap[e.source] = [];
+    if (!edgeMap[e.target]) edgeMap[e.target] = [];
+    edgeMap[e.source].push(e.target);
+    edgeMap[e.target].push(e.source);
+  });
+  return edgeMap;
+}
+
+function startNetworkAnimation() {
+  stopNetworkAnimation();
+  function tick(time) {
+    drawNetworkFrame(time || performance.now());
+    networkState.animationFrame = requestAnimationFrame(tick);
+  }
+  networkState.animationFrame = requestAnimationFrame(tick);
+}
+
+function stopNetworkAnimation() {
+  if (!networkState.animationFrame) return;
+  cancelAnimationFrame(networkState.animationFrame);
+  networkState.animationFrame = 0;
+}
+
+function drawNetworkFrame(time) {
+  var ctx = networkState.ctx;
+  var data = networkState.data || { nodes: [], edges: [] };
+  var nodes = data.nodes || [];
+  var edges = data.edges || [];
+  var positions = networkState.positions;
+  var view = networkState.view;
+  var W = networkState.width, H = networkState.height;
+  if (!ctx) return;
 
   ctx.fillStyle = '#FDFCF0';
   ctx.fillRect(0, 0, W, H);
+  if (!nodes.length) {
+    ctx.fillStyle = '#8A8070';
+    ctx.font = '14px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('没有记忆桶', W/2, H/2);
+    return;
+  }
 
+  ctx.save();
+  ctx.translate(view.x, view.y);
   edges.forEach(function(e) {
     var a = positions[e.source], b = positions[e.target];
     if (!a || !b) return;
+    var isMemoryEdge = e.kind === 'memory_edge';
+    var selectedEdge = networkState.selectedId && (e.source === networkState.selectedId || e.target === networkState.selectedId);
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
-    var isMemoryEdge = e.kind === 'memory_edge';
     ctx.strokeStyle = isMemoryEdge
-      ? 'rgba(154, 123, 79, 0.72)'
-      : 'rgba(47, 79, 79, ' + ((e.similarity || 0.5) * 0.18) + ')';
-    ctx.lineWidth = isMemoryEdge ? 2.2 : Math.max(0.4, (e.similarity || 0.5) * 1.2);
+      ? 'rgba(154, 123, 79, ' + (selectedEdge ? '0.42' : '0.24') + ')'
+      : 'rgba(47, 79, 79, ' + ((e.similarity || 0.5) * (selectedEdge ? 0.12 : 0.07)) + ')';
+    ctx.lineWidth = isMemoryEdge ? (selectedEdge ? 1.35 : 1.05) : Math.max(0.35, (e.similarity || 0.5) * 0.55);
     ctx.stroke();
-    if (isMemoryEdge && e.relation_type) {
-      ctx.fillStyle = '#9A7B4F';
-      ctx.font = '10px Inter, sans-serif';
+    if (selectedEdge && isMemoryEdge && e.relation_type) {
+      ctx.fillStyle = 'rgba(154, 123, 79, 0.54)';
+      ctx.font = '9px Inter, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(e.relation_type, (a.x + b.x) / 2, (a.y + b.y) / 2);
     }
   });
 
   var colors = { dynamic: '#2F4F4F', permanent: '#9A7B4F', feel: '#8B6A6A', archived: '#B0A590' };
-  nodes.forEach(function(n) {
+  nodes.forEach(function(n, i) {
     var p = positions[n.id];
-    var r = Math.max(4, Math.min(14, n.score * 0.8));
+    if (!p) return;
+    var r = NETWORK_NODE_RADIUS;
     var color = colors[n.type] || '#2F4F4F';
+    var isSelected = networkState.selectedId === n.id;
+    var isDragging = networkState.drag && networkState.drag.type === 'node' && networkState.drag.node.id === n.id;
+    var breath = isDragging ? 1.1 : 2.6 + Math.sin(time / 900 + i * 0.72) * 1.7;
 
     ctx.beginPath();
-    ctx.arc(p.x, p.y, r + 4, 0, Math.PI * 2);
-    ctx.fillStyle = color + '15';
+    ctx.arc(p.x, p.y, r + 5 + breath, 0, Math.PI * 2);
+    ctx.fillStyle = color + (isSelected ? '22' : '16');
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r + 2, 0, Math.PI * 2);
+    ctx.fillStyle = color + (isSelected ? '24' : '12');
     ctx.fill();
 
     ctx.beginPath();
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = n.resolved ? color + '70' : color;
+    ctx.fillStyle = n.resolved ? color + '76' : color;
     ctx.fill();
 
     if (n.pinned) {
@@ -2371,16 +2498,185 @@ function drawNetwork(ctx, W, H, data) {
       ctx.lineWidth = 3;
       ctx.stroke();
     }
+    if (isSelected) {
+      ctx.strokeStyle = 'rgba(253, 252, 240, 0.86)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
 
-    var degree = (edgeMap[n.id] || []).length;
-    if (nodes.length <= 45 || n.pinned || n.anchor || n.type === 'feel' || degree >= 2) {
+    var degree = (networkState.edgeMap[n.id] || []).length;
+    if (nodes.length <= 45 || n.pinned || n.anchor || n.type === 'feel' || degree >= 2 || isSelected) {
       var name = n.name.length > 10 ? n.name.slice(0, 10) + '…' : n.name;
-      ctx.fillStyle = '#3A3530';
-      ctx.font = '11px Inter, sans-serif';
+      ctx.fillStyle = isSelected ? '#2F4F4F' : '#3A3530';
+      ctx.font = isSelected ? '12px Inter, sans-serif' : '11px Inter, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(name, p.x, p.y + r + 14);
     }
   });
+  ctx.restore();
+}
+
+function bindNetworkCanvas(canvas) {
+  if (canvas.__ombreNetworkBound) return;
+  canvas.__ombreNetworkBound = true;
+  canvas.addEventListener('pointerdown', handleNetworkPointerDown);
+  canvas.addEventListener('pointermove', handleNetworkPointerMove);
+  canvas.addEventListener('pointerup', handleNetworkPointerUp);
+  canvas.addEventListener('pointercancel', handleNetworkPointerUp);
+  canvas.addEventListener('mouseleave', function() {
+    if (!networkState.drag) canvas.style.cursor = 'grab';
+  });
+}
+
+function networkPointer(event) {
+  var rect = networkState.canvas.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+function findNetworkNodeAt(point) {
+  var nodes = (networkState.data && networkState.data.nodes) || [];
+  var positions = networkState.positions;
+  var view = networkState.view;
+  var best = null;
+  var bestDist = Infinity;
+  nodes.forEach(function(n) {
+    var p = positions[n.id];
+    if (!p) return;
+    var dx = point.x - (p.x + view.x);
+    var dy = point.y - (p.y + view.y);
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist <= NETWORK_NODE_RADIUS + 9 && dist < bestDist) {
+      best = n;
+      bestDist = dist;
+    }
+  });
+  return best;
+}
+
+function handleNetworkPointerDown(event) {
+  if (event.button !== 0 && event.pointerType !== 'touch') return;
+  var point = networkPointer(event);
+  var node = findNetworkNodeAt(point);
+  var position = node ? networkState.positions[node.id] : null;
+  networkState.drag = {
+    type: node ? 'node' : 'pan',
+    node: node,
+    pointerId: event.pointerId,
+    startX: point.x,
+    startY: point.y,
+    viewX: networkState.view.x,
+    viewY: networkState.view.y,
+    nodeX: position ? position.x : 0,
+    nodeY: position ? position.y : 0,
+    moved: false,
+  };
+  hideNetworkPopover();
+  networkState.canvas.classList.add('dragging');
+  try { networkState.canvas.setPointerCapture(event.pointerId); } catch (e) {}
+  event.preventDefault();
+}
+
+function handleNetworkPointerMove(event) {
+  var point = networkPointer(event);
+  var drag = networkState.drag;
+  if (!drag) {
+    networkState.canvas.style.cursor = findNetworkNodeAt(point) ? 'pointer' : 'grab';
+    return;
+  }
+  var dx = point.x - drag.startX;
+  var dy = point.y - drag.startY;
+  if (Math.sqrt(dx * dx + dy * dy) > 3) drag.moved = true;
+  if (drag.type === 'node' && drag.node) {
+    var p = networkState.positions[drag.node.id];
+    if (p) {
+      p.x = drag.nodeX + dx;
+      p.y = drag.nodeY + dy;
+    }
+  } else {
+    networkState.view.x = drag.viewX + dx;
+    networkState.view.y = drag.viewY + dy;
+  }
+  event.preventDefault();
+}
+
+function handleNetworkPointerUp(event) {
+  var drag = networkState.drag;
+  if (!drag) return;
+  var point = networkPointer(event);
+  networkState.drag = null;
+  networkState.canvas.classList.remove('dragging');
+  networkState.canvas.style.cursor = findNetworkNodeAt(point) ? 'pointer' : 'grab';
+  try { networkState.canvas.releasePointerCapture(drag.pointerId); } catch (e) {}
+  if (drag.type === 'node' && drag.node && !drag.moved) {
+    showNetworkPopover(drag.node, point.x, point.y);
+  }
+  event.preventDefault();
+}
+
+async function showNetworkPopover(node, x, y) {
+  networkState.selectedId = node.id;
+  var popover = document.getElementById('network-popover');
+  if (!popover) return;
+  var token = ++networkState.popoverToken;
+  popover.hidden = false;
+  positionNetworkPopover(popover, x, y);
+  popover.innerHTML =
+    '<div class="network-popover-title">' + esc(node.name || node.id) + '</div>' +
+    '<div class="network-popover-meta">' + esc(networkNodeMeta(node)) + '</div>' +
+    '<div class="network-popover-body">加载记忆片段…</div>';
+  try {
+    var res = await authFetch(BASE + '/api/bucket/' + encodeURIComponent(node.id));
+    if (!res || token !== networkState.popoverToken) return;
+    var detail = await res.json();
+    if (token !== networkState.popoverToken) return;
+    var preview = compactNetworkText(detail.content || '').slice(0, 220);
+    popover.innerHTML =
+      '<div class="network-popover-title">' + esc((detail.metadata && detail.metadata.name) || node.name || node.id) + '</div>' +
+      '<div class="network-popover-meta">' + esc(networkNodeMeta(node)) + '</div>' +
+      '<div class="network-popover-body">' + esc(preview || '没有正文预览。') + '</div>';
+    positionNetworkPopover(popover, x, y);
+  } catch (e) {
+    if (token !== networkState.popoverToken) return;
+    popover.innerHTML =
+      '<div class="network-popover-title">' + esc(node.name || node.id) + '</div>' +
+      '<div class="network-popover-meta">' + esc(networkNodeMeta(node)) + '</div>' +
+      '<div class="network-popover-body">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function networkNodeMeta(node) {
+  var parts = [node.type || 'dynamic'];
+  if (node.domain && node.domain.length) parts.push(node.domain.slice(0, 2).join(', '));
+  if (node.pinned) parts.push('pinned');
+  if (node.anchor) parts.push('anchor');
+  return parts.join(' · ');
+}
+
+function compactNetworkText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function positionNetworkPopover(popover, x, y) {
+  var left = Math.min(Math.max(12, x + 16), Math.max(12, networkState.width - 332));
+  var top = Math.min(Math.max(12, y + 16), Math.max(12, networkState.height - 172));
+  popover.style.left = left + 'px';
+  popover.style.top = top + 'px';
+  requestAnimationFrame(function() {
+    var maxLeft = Math.max(12, networkState.width - popover.offsetWidth - 12);
+    var maxTop = Math.max(12, networkState.height - popover.offsetHeight - 12);
+    popover.style.left = Math.min(left, maxLeft) + 'px';
+    popover.style.top = Math.min(top, maxTop) + 'px';
+  });
+}
+
+function hideNetworkPopover() {
+  var popover = document.getElementById('network-popover');
+  networkState.popoverToken++;
+  networkState.selectedId = '';
+  if (popover) {
+    popover.hidden = true;
+    popover.innerHTML = '';
+  }
 }
 
 function esc(s) {
