@@ -1448,6 +1448,7 @@ async def _build_mcp_diffused_memory_block(
     limit_per_source: int,
     min_confidence: float,
     query_text: str = "",
+    exclude_bucket_ids: set[str] | None = None,
 ) -> str:
     if token_budget <= 0 or not source_buckets:
         return ""
@@ -1459,6 +1460,7 @@ async def _build_mcp_diffused_memory_block(
 
     source_ids = [bucket["id"] for bucket in source_buckets if bucket.get("id")]
     source_set = set(source_ids)
+    exclude_set = source_set | set(exclude_bucket_ids or set())
     if not source_ids:
         return ""
 
@@ -1491,7 +1493,7 @@ async def _build_mcp_diffused_memory_block(
         edges,
         bucket_map,
         options=_breath_one_hop_diffusion_options(len(source_ids) * limit_per_source),
-        exclude_ids=source_set,
+        exclude_ids=exclude_set,
         node_salience=node_salience,
         node_resonance=node_resonance,
         query_text=query_text,
@@ -3072,6 +3074,7 @@ async def breath(
             related_per_memory,
             edge_min_confidence,
             query_text=query,
+            exclude_bucket_ids={str(moment.get("bucket_id") or "") for moment in secondary_moments},
         )
         if related_block:
             related_parts.append(related_block)

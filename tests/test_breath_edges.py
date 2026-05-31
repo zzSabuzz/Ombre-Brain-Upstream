@@ -656,6 +656,12 @@ async def test_search_related_stays_on_displayed_direct_topic(patch_breath):
                 score=9.0,
             ),
             _bucket(
+                "G",
+                "希腊神话与FF14：小雨觉得Godless Realms主题和FF14后续版本契合。",
+                name="希腊神话与FF14",
+                score=9.5,
+            ),
+            _bucket(
                 "H",
                 "双向触碰硬件与微信桥进度：ESP32 MPR121 触摸模块。",
                 name="双向触碰硬件与微信桥进度",
@@ -680,8 +686,9 @@ async def test_search_related_stays_on_displayed_direct_topic(patch_breath):
                 score=1.0,
             ),
         ],
-        search_ids=["F", "D", "H", "I"],
+        search_ids=["F", "G", "D", "H", "I"],
         edges=[
+            {"source": "F", "target": "G", "relation_type": "supports", "confidence": 1.0},
             {"source": "H", "target": "B", "relation_type": "supports", "confidence": 1.0},
             {"source": "I", "target": "S", "relation_type": "supports", "confidence": 1.0},
         ],
@@ -690,6 +697,8 @@ async def test_search_related_stays_on_displayed_direct_topic(patch_breath):
     result = await server.breath(query="FF14 进度 偏好", max_results=4, max_tokens=500)
 
     assert "FF14进度与偏好" in result
+    assert result.count("[bucket_id:G]") == 1
+    assert "希腊神话与FF14" in result
     assert "喜欢暗色故事" not in result
     assert "双向触碰硬件" not in result
     assert "ANKNI MX-Z BLE" not in result
