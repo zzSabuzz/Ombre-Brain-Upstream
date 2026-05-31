@@ -82,6 +82,7 @@ from memory_edges import MemoryEdgeStore
 from memory_moments import MemoryMomentStore
 from memory_relevance import (
     active_facets,
+    content_terms_for_query,
     facets_for_text,
     memory_relevance_options_from_config,
     query_has_facet,
@@ -110,6 +111,31 @@ setup_logging(config.get("log_level", "INFO"))
 logger = logging.getLogger("ombre_brain")
 
 MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+WEAK_RECALL_TOPIC_TERMS = {
+    "进度",
+    "偏好",
+    "情况",
+    "状态",
+    "事情",
+    "东西",
+    "内容",
+    "相关",
+    "记忆",
+    "回忆",
+    "总结",
+    "记录",
+    "查询",
+    "搜索",
+    "最近",
+    "之前",
+    "过去",
+    "现在",
+    "当前",
+    "安排",
+    "计划",
+    "问题",
+    "目标",
+}
 
 # --- Initialize core components / 初始化核心组件 ---
 bucket_mgr = BucketManager(config)                  # Bucket manager / 记忆桶管理器
@@ -2174,11 +2200,71 @@ def _secondary_direct_moments(
             continue
         if should_suppress_context_candidate(query, moment, _recall_relevance_options()):
             continue
+        if not _query_wants_body_chain(query) and not _moment_has_query_topic_evidence(query, moment):
+            continue
         hidden.append(moment)
         seen_buckets.add(bucket_id)
     if _query_wants_body_chain(query):
         hidden.sort(key=lambda moment: _recall_rank(query, moment))
     return hidden[:limit]
+
+
+def _moment_has_query_topic_evidence(query: str, moment: dict) -> bool:
+    terms = _specific_query_terms(query)
+    if not terms:
+        return False
+    meta = moment.get("metadata", {}) if isinstance(moment.get("metadata"), dict) else {}
+    fields = " ".join(
+        [
+            str(moment.get("text") or ""),
+            str(meta.get("annotation_summary") or ""),
+            _evidence_spans_text(meta.get("evidence_spans")),
+            str(meta.get("bucket_name") or ""),
+            " ".join(str(tag) for tag in (meta.get("bucket_tags") or []) if str(tag).strip()),
+            " ".join(str(item) for item in (meta.get("bucket_domain") or []) if str(item).strip()),
+        ]
+    ).lower()
+    return any(term.lower() in fields for term in terms)
+
+
+def _specific_query_terms(query: str) -> list[str]:
+    options = _recall_relevance_options()
+    raw = str(query or "")
+    terms = list(content_terms_for_query(raw, options))
+    terms.extend(re.findall(r"\d+(?:\.\d+)+", raw))
+    terms.extend(re.findall(r"[A-Za-z]+[A-Za-z0-9_.:-]*\d[A-Za-z0-9_.:-]*", raw))
+    kept = []
+    seen = set()
+    for term in terms:
+        cleaned = str(term or "").strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        if key in WEAK_RECALL_TOPIC_TERMS:
+            continue
+        if re.fullmatch(r"[a-z0-9_.:-]+", key) and len(key) < 3 and not re.fullmatch(r"\d+(?:\.\d+)+", key):
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fff]+", cleaned) and len(cleaned) < 2:
+            continue
+        seen.add(key)
+        kept.append(cleaned)
+    return kept
+
+
+def _evidence_spans_text(value) -> str:
+    if not isinstance(value, list):
+        return ""
+    parts = []
+    for item in value:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+            if text:
+                parts.append(text)
+        elif isinstance(item, str) and item.strip():
+            parts.append(item.strip())
+    return " ".join(parts)
 
 
 def _representative_moments_by_bucket(moments: list[dict]) -> dict[str, dict]:
@@ -2970,6 +3056,8 @@ async def breath(
         seen_source_bucket_ids = set()
         for moment in returned_moments:
             bucket_id = str(moment.get("bucket_id") or "")
+            if bucket_id not in displayed_bucket_ids:
+                continue
             bucket = bucket_map.get(bucket_id)
             if not bucket or bucket_id in seen_source_bucket_ids:
                 continue

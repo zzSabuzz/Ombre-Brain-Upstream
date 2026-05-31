@@ -615,7 +615,7 @@ async def test_explicit_query_keeps_higher_vector_threshold(patch_breath):
 
 
 @pytest.mark.asyncio
-async def test_search_displays_one_direct_hit_but_diffuses_from_seed_set(patch_breath):
+async def test_search_does_not_diffuse_from_hidden_seed_candidates(patch_breath):
     import server
 
     patch_breath(
@@ -633,7 +633,68 @@ async def test_search_displays_one_direct_hit_but_diffuses_from_seed_set(patch_b
 
     assert "[bucket_id:A]" in direct_block
     assert "[bucket_id:B]" not in direct_block
-    assert "[bucket_id:C]" in result
+    assert "[bucket_id:B]" not in result
+    assert "[bucket_id:C]" not in result
+
+
+@pytest.mark.asyncio
+async def test_search_related_stays_on_displayed_direct_topic(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "F",
+                "FF14进度与偏好：用户目前处于6.x版本，打算写完论文后继续跑主线。",
+                name="FF14进度与偏好",
+                score=10.0,
+            ),
+            _bucket(
+                "D",
+                "喜欢暗色故事：偏好阴郁复杂的故事气质。",
+                name="喜欢暗色故事",
+                score=9.0,
+            ),
+            _bucket(
+                "H",
+                "双向触碰硬件与微信桥进度：ESP32 MPR121 触摸模块。",
+                name="双向触碰硬件与微信桥进度",
+                score=8.0,
+            ),
+            _bucket(
+                "B",
+                "ANKNI MX-Z BLE协议逆向：Windows 直连控制已经跑通。",
+                name="ANKNI MX-Z BLE协议逆向",
+                score=1.0,
+            ),
+            _bucket(
+                "I",
+                "称呼偏好：亲密关系里的角色和调情模式。",
+                name="称呼偏好",
+                score=8.0,
+            ),
+            _bucket(
+                "S",
+                "调情模式：亲密挑衅和占有欲回应。",
+                name="调情模式",
+                score=1.0,
+            ),
+        ],
+        search_ids=["F", "D", "H", "I"],
+        edges=[
+            {"source": "H", "target": "B", "relation_type": "supports", "confidence": 1.0},
+            {"source": "I", "target": "S", "relation_type": "supports", "confidence": 1.0},
+        ],
+    )
+
+    result = await server.breath(query="FF14 进度 偏好", max_results=4, max_tokens=500)
+
+    assert "FF14进度与偏好" in result
+    assert "喜欢暗色故事" not in result
+    assert "双向触碰硬件" not in result
+    assert "ANKNI MX-Z BLE" not in result
+    assert "称呼偏好" not in result
+    assert "调情模式" not in result
 
 
 @pytest.mark.asyncio
