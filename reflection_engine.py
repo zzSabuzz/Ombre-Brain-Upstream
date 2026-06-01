@@ -475,7 +475,8 @@ class ReflectionEngine:
         now_local = self._local_now()
         results = []
         if now_local.hour >= self.daily_hour:
-            daily_target = now_local - timedelta(days=1)
+            daily_date = (now_local - timedelta(days=1)).date()
+            daily_target = datetime.combine(daily_date, time.max, tzinfo=self.tz)
             results.append(
                 await self.reflect("daily", bucket_mgr, persona_engine, embedding_engine, force=False, now=daily_target)
             )

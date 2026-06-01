@@ -363,6 +363,47 @@ async def test_reflect_daily_affect_anchor_can_be_disabled(test_config):
 
 
 @pytest.mark.asyncio
+async def test_run_due_daily_uses_complete_previous_day(test_config, monkeypatch):
+    cfg = _no_api_config(test_config)
+    cfg["reflection"]["auto_enabled"] = True
+    cfg["reflection"]["daily_hour"] = 4
+    bucket_mgr = BucketManager(cfg)
+    engine = ReflectionEngine(cfg)
+    tz = ZoneInfo("Asia/Shanghai")
+    now = datetime(2026, 6, 2, 4, 10, tzinfo=tz)
+    monkeypatch.setattr(engine, "_local_now", lambda now_arg=None: now_arg.astimezone(tz) if now_arg else now)
+
+    await bucket_mgr.create(
+        content="昨天早上，小雨和Haven讨论日印象窗口。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天早上的记忆",
+        created="2026-06-01T08:00:00+08:00",
+        last_active="2026-06-01T08:00:00+08:00",
+        updated_at="2026-06-01T08:00:00+08:00",
+    )
+    await bucket_mgr.create(
+        content="昨天晚上，小雨补充日印象不该漏掉夜里的记忆。",
+        tags=["日印象"],
+        importance=6,
+        domain=["数字"],
+        name="昨天晚上的记忆",
+        created="2026-06-01T22:00:00+08:00",
+        last_active="2026-06-01T22:00:00+08:00",
+        updated_at="2026-06-01T22:00:00+08:00",
+    )
+
+    results = await engine.run_due(bucket_mgr)
+    bucket = await bucket_mgr.get("reflection_daily_2026-06-01")
+
+    assert results[0]["date"] == "2026-06-01"
+    assert results[0]["materials"]["buckets"] == 2
+    assert "昨天早上的记忆" in bucket["content"]
+    assert "昨天晚上的记忆" in bucket["content"]
+
+
+@pytest.mark.asyncio
 async def test_reflect_daily_extracts_diary_memory_when_no_ordinary_memory(test_config, monkeypatch):
     cfg = _no_api_config(test_config)
     bucket_mgr = BucketManager(cfg)
