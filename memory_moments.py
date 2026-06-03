@@ -227,6 +227,54 @@ class MemoryMomentStore:
         conn.close()
         return [dict(row) for row in rows]
 
+    def replace_generated_edges(
+        self,
+        edges: list[dict],
+        *,
+        reason_prefix: str = "local_graph:",
+    ) -> int:
+        prefix = str(reason_prefix or "").strip()
+        if not prefix:
+            raise ValueError("reason_prefix is required")
+        conn = self._connect()
+        conn.execute(
+            "DELETE FROM memory_moment_edges WHERE reason LIKE ?",
+            (f"{prefix}%",),
+        )
+        written = 0
+        for edge in edges or []:
+            if not isinstance(edge, dict):
+                continue
+            source = str(edge.get("source") or "").strip()
+            target = str(edge.get("target") or "").strip()
+            bucket_id = str(edge.get("bucket_id") or "").strip()
+            relation_type = str(edge.get("relation_type") or "relates_to").strip()
+            if not source or not target or source == target or not bucket_id:
+                continue
+            reason = str(edge.get("reason") or "").strip()
+            if not reason.startswith(prefix):
+                reason = f"{prefix}{reason}"
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO memory_moment_edges
+                (source, target, bucket_id, relation_type, confidence, reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source,
+                    target,
+                    bucket_id,
+                    relation_type,
+                    _clamp_float(edge.get("confidence", 0.5), 0.0, 1.0),
+                    reason[:240],
+                    str(edge.get("created_at") or datetime.now(timezone.utc).isoformat(timespec="seconds")),
+                ),
+            )
+            written += 1
+        conn.commit()
+        conn.close()
+        return written
+
     def search_moments(
         self,
         query: str,
@@ -986,6 +1034,13 @@ def _safe_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _clamp_float(value: Any, low: float, high: float) -> float:
+    parsed = _safe_float(value)
+    if parsed is None:
+        parsed = low
+    return max(low, min(high, parsed))
 
 
 def _clip_text(text: str, max_chars: int) -> str:
