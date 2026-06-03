@@ -1,4 +1,4 @@
-# 2026-05-29 Ombre 记忆图结构交接
+# 2026-05-31 Ombre 记忆图结构交接
 
 ## 当前状态
 
@@ -14,7 +14,15 @@ D:\Ombre-Brain
 feature/memory-diffusion-p0
 ```
 
-截至本交接文档，图结构相关改动还在本地工作区，尚未整理提交。`git status` 里除图结构相关文件外，还有一些无关未跟踪目录，不要误删：
+截至 2026-05-31，本轮 recall / Gateway 收紧已提交并推到 `feature/memory-diffusion-p0`。VPS `/opt/Ombre-Brain` 已部署到：
+
+```text
+d148e85 fix: gate recent context by explicit query topic
+```
+
+`main` 是否已经同步需要另查，不要默认 VPS 跑的是 `main`。
+
+本次文档更新之外，工作区里仍有一些无关未跟踪目录/文件，不要误删：
 
 ```text
 .codex-remote-attachments/
@@ -27,14 +35,18 @@ tests/test_local_memory_worker.py
 本轮已验证：
 
 ```powershell
-python -m py_compile server.py memory_edges.py memory_diffusion.py memory_moments.py gateway.py gateway_state.py
-python -m pytest tests/test_memory_api.py tests/test_breath_edges.py tests/test_memory_moments.py tests/test_memory_diffusion.py tests/test_gateway.py -q --tb=short
+python -m pytest tests/test_gateway.py -q --tb=short
+python -m pytest tests/test_breath_edges.py tests/test_memory_recall_golden.py tests/test_memory_diffusion.py -q --tb=short
+python -m py_compile gateway.py server.py memory_relevance.py memory_diffusion.py
 ```
 
 结果：
 
 ```text
-117 passed, 2 warnings
+55 passed
+45 passed
+py_compile passed
+VPS health: ombre-brain ok, ombre-gateway ok
 ```
 
 ## 设计结论
@@ -413,6 +425,13 @@ D:\Ombre-Brain\server.py
 
 6. 联想浮现沿 moment graph 扩散，给短摘要。
 
+2026-05-31 之后，`breath(query=...)` 又加了一层显式主题约束：
+
+- `进度 / 偏好 / 情况 / 状态` 这类弱主题词不能单独把隐藏候选放出来。
+- 直接命中准确时，扩散 seed 只用已经展示出来的 direct hit，或强同主题候选。
+- 对带明确实体/主题的 query，扩散目标也要有 query topic evidence。
+- 已经作为 secondary direct 展示的 bucket，不再重复进路径扩散。
+
 ### Gateway
 
 文件：
@@ -422,6 +441,13 @@ D:\Ombre-Brain\gateway.py
 ```
 
 Gateway 也已接入 moment graph 的注入拼接，并传 `query_text` 给扩散。现在可以通过 `GET /api/debug/injections` 看实际注入结果。
+
+2026-05-31 已把 `breath()` 的核心召回约束同步到 Gateway：
+
+- bucket / moment 候选使用 `recall_search_query(query)` 搜索，但 gate / rerank 仍看原始 query。
+- `小雨 发邮件` 这类 action query 会剥离人名/上下文词，避免“小雨沟通偏好”压过“发邮件”动作意图。
+- Gateway 的 secondary direct、diffused memory、bucket fallback 都会遵守显式主题 evidence gate。
+- `Recent Context` 对明确主题 query 也会过滤离题最近记忆；对“最近发生了什么”这类模糊 query 保持原行为。
 
 需要注意：
 
@@ -491,6 +517,11 @@ test_introspection_profile_fact_candidates_skip_configured_ai_name
 test_body_query_prefers_embodiment_chain_and_suppresses_intimacy_and_old_context
 test_intimate_query_can_follow_intimate_body_context
 test_gateway_body_query_injects_moment_chain
+test_search_does_not_diffuse_from_hidden_seed_candidates
+test_search_related_stays_on_displayed_direct_topic
+test_gateway_explicit_topic_diffusion_stays_on_topic
+test_gateway_recent_context_stays_on_explicit_topic
+test_gateway_recent_context_keeps_recent_items_for_vague_query
 ```
 
 ## 风险与注意点
@@ -607,24 +638,130 @@ direct_useful / background_useful / wrong_context / stale / sensitive_mismatch
 
 reranker 先做成可选配置，不要阻塞基本召回。embedding 模型即使用 1024 维 0.6B，也不应单独承担最终判断；它适合召回候选，不适合决定是否注入。
 
+## 2026-05-31 追加：breath / Gateway 召回收紧
+
+这段是已实现状态，不只是设计备忘。
+
+### 1. 已解决的坏例子
+
+`breath(query="FF14 进度 偏好")` 曾经直接命中 FF14 后，又在“联想浮现”里拉出硬件、BLE、称呼、调情、暗色故事。原因不是单纯阈值问题，而是：
+
+- `进度` 这种弱词把“其他项目进度”也当成同主题。
+- 隐藏候选参与了扩散 seed。
+- 直接命中已经很明确时，扩散仍然从更多候选外溢。
+
+现在 VPS 实测结果：
+
+```text
+直接命中: FF14进度与计划
+Diffused / Recent: 只保留同主题的 希腊神话与FF14
+未出现: 厄科与纳西索斯、硬件、BLE、称呼、调情
+```
+
+### 2. breath 现在的额外规则
+
+文件：
+
+```text
+D:\Ombre-Brain\server.py
+```
+
+核心规则：
+
+- `WEAK_RECALL_TOPIC_TERMS` 里的弱词不能单独放行候选。
+- `_specific_query_terms()` 会抽取更有信息量的 query term。
+- `_moment_has_query_topic_evidence()` / `_bucket_has_query_topic_evidence()` 判断候选是否真的有主题证据。
+- 明确主题 query 下，hidden candidates 不能作为 diffusion seed。
+- related 输出会跳过已经展示过的 bucket，避免同一记忆重复出现在 direct 和 path diffusion。
+
+### 3. Gateway 已同步
+
+文件：
+
+```text
+D:\Ombre-Brain\gateway.py
+```
+
+Gateway 同步了同一组 topic evidence 判断，作用在：
+
+- secondary direct moments。
+- moment diffused memory。
+- bucket fallback diffused memory。
+- Recent Context。
+
+注意：Gateway 仍然比 `breath()` 更像“伴随背景”，不是把检索结果摊开。现在只是让自动注入不要在明确主题里乱跳。
+
+### 4. Persona event 写入节流
+
+文件：
+
+```text
+D:\Ombre-Brain\persona_engine.py
+D:\Ombre-Brain\utils.py
+D:\Ombre-Brain\config.example.yaml
+```
+
+当前策略：
+
+- 普通事件默认攒到 `event_batch_size=2` 再写。
+- 明显关系事件、强情绪、人格信号、较大 affect 变化仍可立即写。
+- 相近 ordinary event 在 `event_force_after_minutes=30` 内会跳过或合并。
+- 被跳过的普通 exchange 会写入 `persona_exchange_log`，避免重复处理。
+
+这样 Recent Persona Events 不再每条消息都写，但模型仍能看到真正有变化的情绪/关系信号。
+
+### 5. Reranker 当前状态
+
+VPS health 已确认 Gateway reranker 启用：
+
+```text
+Qwen/Qwen3-Reranker-4B
+base_url=https://api.siliconflow.cn/v1
+```
+
+embedding 当前实际模型以线上 `config.runtime.yaml` / health 为准；不要只凭旧文档假定已经切到 4B 或 8B。
+
+### 6. 仍然保留的下一步
+
+- 把 `server.py` 和 `gateway.py` 重复的 query topic 逻辑抽到共享 planner，避免两边各改一遍。
+- golden queries 保持小而准，不要把所有例子都写成人工样本库。
+- 更好的方向是 property tests：隐藏候选不能当 seed、明确实体扩散目标必须有证据、模糊 query 仍保留最近上下文。
+- 可以加轻量前置计划器，先产出 `intent / search_query / required_terms / weak_terms / diffusion_policy / related_limit`。
+- 哨兵 LLM 只在候选很混、reranker 分数接近、或 query 没有明确锚点时再调用。
+
 ## 后续建议
 
 ### 1. 本地增量建图 worker
 
-最值得继续做：
+基础版已完成，不再是空任务。
 
 ```text
 python scripts/build_moment_graph.py --incremental
 ```
 
-职责：
+已实现职责：
 
 - 扫描 changed buckets。
 - 基于 `memory_moments.sqlite` 读取 moment。
-- 用 BM25 / embedding / 小模型补跨桶边。
-- 5 分钟跑一次。
-- 写入 `memory_moment_edges` 或新表。
+- 用本地词面 + facet/tag/domain 证据补跨桶边。
+- 默认 dry-run；只有显式 `--write` 才写入。
+- 写入 `memory_moment_edges`，`reason` 统一以 `local_graph:` 开头。
 - 不阻塞 MCP / Gateway 请求。
+
+已验证：
+
+- `4c26e28 Add local moment graph worker`：新增 worker 和 `replace_generated_edges()`。
+- `69de57a Tighten local graph edge evidence`：过滤 `todo / commitment / flavor_* / haven_favorite` 等弱证据，VPS dry-run 候选从 111 降到 15。
+- `926487b Filter context glue in graph worker`：过滤 `小雨与 / 小雨告诉我` 这类 context-term 胶水词，VPS dry-run 候选为 12。
+- 写入前备份 live SQLite：`/state/memory_moments.pre-local-graph-20260603-181211.sqlite`。
+- VPS 受控写入：160 buckets，276 moments，写入 12 条 `local_graph:`。
+- `9be98de Preserve generated moment graph edges on refresh`：修复 `upsert_bucket()` / runtime refresh 会删掉 worker 边的问题。
+- `server._refresh_moment_graph()` live 验证后仍有 `runtime_local_graph_edges: 12`，DB 里也仍是 12。
+
+仍未做：
+
+- 还没有接 cron / systemd timer。
+- 暂时不让 worker 自动写入；下一步如果要自动化，先加 dry-run 日志观察，再决定是否按低频 `--write`。
 
 ### 2. Typed edge + path scoring
 
@@ -690,9 +827,62 @@ source_ref:
 3. 跑：
 
 ```powershell
-python -m pytest tests/test_memory_api.py tests/test_breath_edges.py tests/test_memory_moments.py tests/test_memory_diffusion.py tests/test_gateway.py -q --tb=short
+python -m pytest tests/test_gateway.py tests/test_breath_edges.py tests/test_memory_recall_golden.py tests/test_memory_diffusion.py -q --tb=short
+python -m py_compile gateway.py server.py memory_relevance.py memory_diffusion.py
 ```
 
-4. 若要继续实现，优先做本地 `moment graph worker`，不要把 LLM 建边塞进 `breath()`。
+4. 若要继续实现，优先抽共享 recall query planner，不要继续让 `server.py` / `gateway.py` 各自复制 query gate。
 5. 若要排查 Gateway 注入，先看 `GET /api/debug/injections`。
-6. 若要调 profile_fact，先用 `introspection(created_date="YYYY-MM-DD")` 找证据桶，再手动调用 `profile_fact(...)`。
+6. 若要继续做图结构，再做本地 `moment graph worker`，不要把 LLM 建边塞进 `breath()`。
+7. 若要调 profile_fact，先用 `introspection(created_date="YYYY-MM-DD")` 找证据桶，再手动调用 `profile_fact(...)`。
+
+## 2026-06-03 追加：direct 返回形状先改，不先改召回轴
+
+小雨重新评估后，决定不要先退回“整桶召回”的旧模式，也不要马上做完整 `retrieval_mode=bucket`。当前下一步先只改 Direct / Recalled 的展示形状，保留 p0 现有图召回、moment seed 和扩散约束。
+
+### 目标行为
+
+- `Direct / Recalled` 是证据层：可靠直接命中要比现在的 moment 摘要保留更多原文细节。
+- 短桶：direct 返回整桶原文。
+- 长桶：direct 返回命中 moment + 原文窗口。
+- 高价值桶或用户明确问细节、原文、当时怎么说：长桶也返回脱水整桶胶囊。
+- `Diffused / Related` 是联想层：永远只给摘要和路径，不搬远处整桶原文。
+- `Dream` 是浮现层：永远返回梦境原文，不在 memory 层主动截断；只受模型上下文窗口影响。
+
+### 先做的配置轴
+
+先加 `direct_render_mode`，建议三档：
+
+```yaml
+gateway:
+  direct_render_mode: auto   # auto | compact | full
+```
+
+含义：
+
+- `auto`：默认。短桶原文；长桶 moment + 原文窗口；高价值桶或细节 query 用脱水整桶胶囊。
+- `compact`：长桶只给命中 moment + 原文窗口，尽量少塞。
+- `full`：可靠 direct 尽量整桶，太长再脱水。
+
+`breath()` 也应提供同名参数，默认 `auto`，让 MCP 和 Gateway 的直命中展示规则一致。
+
+### 暂缓的配置轴
+
+`retrieval_mode` 可以后续再做，但不要第一步做：
+
+```yaml
+gateway:
+  retrieval_mode: graph   # graph | bucket
+```
+
+- `graph`：p0 当前路线，moment + edges + diffusion。
+- `bucket`：接近 main 的旧桶召回味道，不走 moment graph，不扩散。
+
+原因：当前真正的问题是 direct 展示太碎，不是召回判定整体错了。先只改返回形状，测试时更容易判断效果；如果同时改 `retrieval_mode`，会分不清是“召回变了”还是“返回形状变了”。
+
+### 实现边界
+
+- moment 仍用于召回判定、可靠性 gate、扩散 seed。
+- direct 最终展示按 bucket 渲染；同一 bucket 多个 moment 命中时只展示一次。
+- 脱水胶囊应单独 cache，避免和扩散摘要的短 summary 混用。
+- 扩散输出继续用 compact summary，不能因为 direct 改成原文而变吵。
