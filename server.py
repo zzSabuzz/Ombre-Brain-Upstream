@@ -104,6 +104,7 @@ from utils import (
     load_config,
     now_iso,
     setup_logging,
+    strip_display_temperature_sections,
     strip_temperature_meaning_lines,
     strip_wikilinks,
 )
@@ -1892,6 +1893,172 @@ def _format_direct_moment(seed: dict, grouped: dict[str, list[dict]], token_budg
     return compact if count_tokens_approx(compact) <= token_budget else ""
 
 
+async def _format_direct_bucket(
+    bucket: dict,
+    moment: dict,
+    grouped: dict[str, list[dict]],
+    token_budget: int,
+    *,
+    query_text: str = "",
+    direct_render_mode: str = "auto",
+) -> str:
+    original = _rendered_bucket_content(bucket)
+    header = _direct_bucket_header(bucket, moment)
+    original_block = f"{header} bucket_original\n{original}" if original else f"{header} bucket_original"
+    if count_tokens_approx(original_block) <= token_budget:
+        return original_block
+
+    wants_capsule = direct_render_mode == "full" or (
+        direct_render_mode == "auto"
+        and (_bucket_is_high_value(bucket) or _query_requests_direct_detail(query_text))
+    )
+    if wants_capsule:
+        try:
+            capsule = await dehydrator.dehydrate_direct_capsule(
+                original,
+                _bucket_metadata_for_dehydration(bucket),
+            )
+            block = f"{header} bucket_capsule\n{capsule}\nmatched_moment: {_moment_text(moment, 220)}"
+            if count_tokens_approx(block) <= token_budget:
+                return block
+            compact = f"{header} bucket_capsule\n{_clip_text(capsule, 260)}"
+            if count_tokens_approx(compact) <= token_budget:
+                return compact
+            return _trim_text_to_token_budget(compact, token_budget)
+        except Exception as e:
+            logger.warning(f"Direct bucket capsule failed / 直接命中整桶脱水失败: {e}")
+
+    return _format_direct_bucket_window(bucket, moment, grouped, token_budget)
+
+
+def _format_direct_bucket_window(
+    bucket: dict,
+    moment: dict,
+    grouped: dict[str, list[dict]],
+    token_budget: int,
+) -> str:
+    header = _direct_bucket_header(bucket, moment)
+    original = _rendered_bucket_content(bucket)
+    parts = [
+        f"{header} bucket_window",
+        f"matched_moment: {_moment_text(moment, 320)}",
+    ]
+    window = _original_window_around_moment(original, moment)
+    if window:
+        parts.append("original_window:\n" + window)
+    context_lines = [
+        f"- [{_moment_label(context)}] [moment_id:{context['moment_id']}] {_moment_text(context, 120)}"
+        for context in _context_moments_for_seed(moment, grouped)
+        if context.get("section") in MOMENT_TEMPERATURE_SECTIONS
+    ][:2]
+    if context_lines:
+        parts.append("语境:\n" + "\n".join(context_lines))
+    block = "\n".join(parts)
+    if count_tokens_approx(block) <= token_budget:
+        return block
+    compact_parts = [
+        f"{header} bucket_window",
+        f"matched_moment: {_moment_text(moment, 120)}",
+    ]
+    if window:
+        compact_parts.append("original_window:\n" + _clip_text(window, 220))
+    compact = "\n".join(compact_parts)
+    if count_tokens_approx(compact) <= token_budget:
+        return compact
+    return _trim_text_to_token_budget(compact, token_budget)
+
+
+def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
+    if token_budget <= 0:
+        return ""
+    trimmed = str(text or "").strip()
+    while trimmed and count_tokens_approx(trimmed) > token_budget:
+        cut = max(1, int(len(trimmed) * 0.85))
+        trimmed = trimmed[:cut].rstrip()
+    return trimmed
+
+
+def _normalize_direct_render_mode(value: object) -> str:
+    mode = str(value or "auto").strip().lower()
+    return mode if mode in {"auto", "compact", "full"} else "auto"
+
+
+def _query_requests_direct_detail(query: str) -> bool:
+    text = str(query or "").strip().lower()
+    if not text:
+        return False
+    phrases = (
+        "细节",
+        "原文",
+        "完整",
+        "整条",
+        "整桶",
+        "全部",
+        "当时怎么说",
+        "当时说了什么",
+        "具体怎么说",
+        "怎么写的",
+        "旧记录",
+    )
+    return any(phrase in text for phrase in phrases)
+
+
+def _bucket_is_high_value(bucket: dict) -> bool:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if meta.get("pinned") or meta.get("protected") or meta.get("anchor"):
+        return True
+    try:
+        if int(meta.get("importance", 5)) >= 9:
+            return True
+    except (TypeError, ValueError):
+        pass
+    tags = {str(tag).lower() for tag in meta.get("tags", []) or []}
+    return "haven_favorite" in tags
+
+
+def _bucket_metadata_for_dehydration(bucket: dict) -> dict:
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    return {key: value for key, value in meta.items() if key not in {"tags", "comments"}}
+
+
+def _direct_bucket_header(bucket: dict, moment: dict) -> str:
+    bucket_id = str(bucket.get("id") or moment.get("bucket_id") or "")
+    title = _moment_bucket_title(moment) or str((bucket.get("metadata", {}) or {}).get("name") or bucket_id)
+    section = str(moment.get("section") or "body")
+    return f"[bucket_id:{bucket_id}] [moment_id:{moment.get('moment_id') or ''}] {section} {title}".strip()
+
+
+def _rendered_bucket_content(bucket: dict) -> str:
+    text = strip_wikilinks(str(bucket.get("content") or ""))
+    text = strip_display_temperature_sections(text)
+    return strip_temperature_meaning_lines(text).strip()
+
+
+def _original_window_around_moment(original: str, moment: dict, max_chars: int = 760) -> str:
+    text = str(original or "").strip()
+    if not text:
+        return ""
+    needle = strip_temperature_meaning_lines(strip_wikilinks(str(moment.get("text") or ""))).strip()
+    compact_needle = " ".join(needle.split())
+    compact_text = " ".join(text.split())
+    if not compact_needle:
+        return _clip_text(compact_text, max_chars)
+    index = compact_text.find(compact_needle)
+    if index < 0:
+        index = compact_text.find(compact_needle[:80])
+    if index < 0:
+        return _clip_text(compact_text, max_chars)
+    half = max_chars // 2
+    start = max(0, index - half)
+    end = min(len(compact_text), index + len(compact_needle) + half)
+    window = compact_text[start:end].strip()
+    if start > 0:
+        window = "..." + window
+    if end < len(compact_text):
+        window += "..."
+    return window
+
+
 def _format_related_moment(
     moment: dict,
     caution: bool = False,
@@ -2920,6 +3087,7 @@ async def breath(
     is_session_start: bool = False,
     debug: bool = False,
     surface: str = "manual",
+    direct_render_mode: str = "auto",
 ) -> str:
     """读取记忆,不写入。
     调用方式: 新对话用 breath(is_session_start=True); 查过去用 breath(query="主题词"); 只读模型感受用 breath(domain="feel"); 只读悄悄话用 breath(domain="whisper")。
@@ -2940,6 +3108,7 @@ async def breath(
     debug = _bool_value(debug, False)
     surface_key = str(surface or "manual").strip().lower()
     auto_surface = surface_key in {"auto", "automatic", "bridge", "gateway"}
+    direct_render_mode = _normalize_direct_render_mode(direct_render_mode)
     domain_key = domain.strip().lower()
 
     # --- Feel/whisper retrieval: independent read-only channels ---
@@ -3259,7 +3428,17 @@ async def breath(
         if bucket_id in displayed_bucket_ids:
             continue
         try:
-            entry = _format_direct_moment(moment, grouped_moments, max_tokens - token_used)
+            bucket = bucket_map.get(bucket_id)
+            if not bucket:
+                continue
+            entry = await _format_direct_bucket(
+                bucket,
+                moment,
+                grouped_moments,
+                max_tokens - token_used,
+                query_text=query,
+                direct_render_mode=direct_render_mode,
+            )
             if not entry:
                 break
             entry_tokens = count_tokens_approx(entry)

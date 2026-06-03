@@ -21,6 +21,11 @@ class DummyDehydrator:
         compact = " ".join((content or "").strip().split())
         return f"{name}: {compact[:80]}"
 
+    async def dehydrate_direct_capsule(self, content: str, metadata: dict | None = None) -> str:
+        name = (metadata or {}).get("name", "未命名")
+        compact = " ".join((content or "").strip().split())
+        return f"DIRECT CAPSULE {name}: {compact[:120]}"
+
 
 class DummyEmbeddingEngine:
     def __init__(
@@ -2242,6 +2247,140 @@ def test_gateway_diffused_memory_uses_summary_only_for_moments(
     assert "Diffused Memory" in injected
     assert "扩散摘要目标" in injected
     assert "扩散目标原文-绝对不能出现 ABC123" not in injected
+
+
+def test_gateway_direct_short_bucket_renders_original(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content="小雨说蓝色偏好要被可靠记住。\n第二句细节也应该保留。",
+        name="蓝色偏好",
+        hours_ago=2,
+        importance=6,
+        domain=["日常"],
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=500,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+        ),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.96)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-direct-short-original",
+            },
+            json={"messages": [{"role": "user", "content": "蓝色偏好"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "Recalled Memory" in injected
+    assert "bucket_original" in injected
+    assert "第二句细节也应该保留" in injected
+
+
+def test_gateway_direct_long_bucket_renders_window_in_auto_mode(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    long_prefix = " ".join(f"前情{i}" for i in range(220))
+    long_tail = " ".join(f"尾巴{i}" for i in range(220))
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content=f"{long_prefix}\n\n## original\n命中短句：蓝色偏好可靠链路回归。\n\n{long_tail}",
+        name="长桶窗口",
+        hours_ago=2,
+        importance=5,
+        domain=["日常"],
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=260,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+        ),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.96)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-direct-window",
+            },
+            json={"messages": [{"role": "user", "content": "蓝色偏好"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "bucket_window" in injected
+    assert "matched_moment:" in injected
+    assert "original_window:" in injected
+    assert "蓝色偏好可靠链路回归" in injected
+    assert "尾巴219" not in injected
+
+
+def test_gateway_direct_high_value_long_bucket_renders_capsule(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    long_body = " ".join(f"高价值细节{i}" for i in range(260))
+    bucket_id = _create_bucket(
+        bucket_mgr,
+        content=f"## original\n小雨问当时怎么说。\n{long_body}",
+        name="高价值长桶",
+        hours_ago=2,
+        importance=10,
+        domain=["恋爱"],
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=420,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+        ),
+        bucket_mgr,
+        embedding_results=[(bucket_id, 0.96)],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-direct-capsule",
+            },
+            json={"messages": [{"role": "user", "content": "当时怎么说"}]},
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "bucket_capsule" in injected
+    assert "DIRECT CAPSULE 高价值长桶" in injected
+    assert "matched_moment:" in injected
 
 
 def test_gateway_diffused_memory_renders_temperature_context(

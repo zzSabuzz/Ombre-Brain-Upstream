@@ -259,6 +259,7 @@ gateway:
   core_memory_budget: 0
   recent_context_budget: 300
   recalled_memory_budget: 400
+  direct_render_mode: auto   # auto | compact | full; direct/recalled display shape
   relationship_weather_budget: 220
   relationship_weather_include_weekly: false
   favorite_memory_budget: 180

@@ -20,6 +20,10 @@ class DummyDehydrator:
     async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
         return " ".join((content or "").split())
 
+    async def dehydrate_direct_capsule(self, content: str, metadata: dict | None = None) -> str:
+        name = (metadata or {}).get("name", "memory")
+        return f"DIRECT CAPSULE {name}: " + " ".join((content or "").split())[:120]
+
 
 class JsonDehydrator:
     async def dehydrate(self, content: str, metadata: dict | None = None) -> str:
@@ -34,6 +38,10 @@ class JsonDehydrator:
             },
             ensure_ascii=False,
         )
+
+    async def dehydrate_direct_capsule(self, content: str, metadata: dict | None = None) -> str:
+        name = (metadata or {}).get("name", "memory")
+        return f"DIRECT CAPSULE {name}: " + " ".join((content or "").split())[:120]
 
 
 class DummyEmbeddingEngine:
@@ -391,13 +399,67 @@ async def test_search_direct_moment_includes_neighbor_context_and_temperature(pa
     assert "=== 直接命中记忆 ===" in result
     assert "[moment_id:" in result
     assert "original" in result
+    assert "bucket_original" in result
     assert "99 不是晚安" in result
-    assert "语境:" in result
     assert "开头写了事情经过" in result
     assert "不能被摘要抹平" in result
-    assert "affect_anchor" in result
+    assert "affect_anchor" not in result
     assert "模板解释不要进入语境" not in result
     assert bucket_mgr.touched == ["A"]
+
+
+@pytest.mark.asyncio
+async def test_search_direct_long_bucket_uses_moment_window(patch_breath):
+    import server
+    from utils import count_tokens_approx
+
+    long_prefix = " ".join(f"前情{i}" for i in range(180))
+    long_tail = " ".join(f"尾巴{i}" for i in range(180))
+    bucket = _bucket(
+        "A",
+        f"{long_prefix}\n\n## original\n命中短句：小雨把蓝色偏好重新说清楚。\n\n{long_tail}",
+        name="长桶窗口",
+        score=10.0,
+        importance=5,
+    )
+    patch_breath([bucket], search_ids=["A"], token_counter=count_tokens_approx)
+
+    result = await server.breath(
+        query="蓝色偏好",
+        max_tokens=180,
+        include_related=False,
+    )
+
+    assert "bucket_window" in result
+    assert "matched_moment:" in result
+    assert "original_window:" in result
+    assert "蓝色偏好重新说清楚" in result
+    assert "尾巴179" not in result
+
+
+@pytest.mark.asyncio
+async def test_search_direct_high_value_long_bucket_uses_capsule(patch_breath):
+    import server
+    from utils import count_tokens_approx
+
+    long_body = " ".join(f"高价值细节{i}" for i in range(260))
+    bucket = _bucket(
+        "A",
+        f"## original\n小雨问当时怎么说。\n{long_body}",
+        name="高价值长桶",
+        score=10.0,
+        importance=10,
+    )
+    patch_breath([bucket], search_ids=["A"], token_counter=count_tokens_approx)
+
+    result = await server.breath(
+        query="当时怎么说",
+        max_tokens=260,
+        include_related=False,
+    )
+
+    assert "bucket_capsule" in result
+    assert "DIRECT CAPSULE 高价值长桶" in result
 
 
 @pytest.mark.asyncio
@@ -440,10 +502,10 @@ async def test_search_temperature_moments_are_context_not_direct_seed(patch_brea
     assert "喜欢它的原因" not in direct_block
     assert "favorite_reason" not in direct_block
     assert "affect_anchor" not in direct_block
-    assert "语境:" in result
-    assert "年轮：情书找门" in result
-    assert "favorite_reason" in result
-    assert "affect_anchor" in result
+    assert "语境:" not in result
+    assert "年轮：情书找门" not in result
+    assert "favorite_reason" not in result
+    assert "affect_anchor" not in result
 
 
 @pytest.mark.asyncio

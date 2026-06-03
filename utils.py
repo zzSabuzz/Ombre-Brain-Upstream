@@ -162,6 +162,7 @@ def load_config(config_path: str = None) -> dict:
             "core_memory_budget": 0,
             "recent_context_budget": 300,
             "recalled_memory_budget": 400,
+            "direct_render_mode": "auto",
             "relationship_weather_budget": 220,
             "favorite_memory_budget": 0,
             "favorite_memory_max_cards": 1,
@@ -597,6 +598,9 @@ def strip_wikilinks(text: str) -> str:
 
 
 _AFFECT_ANCHOR_RE = re.compile(r"(?ims)^###\s*affect_anchor\s*$.*?(?=^###\s+|\Z)")
+_DISPLAY_TEMPERATURE_SECTION_RE = re.compile(
+    r"(?ims)^###\s*(?:affect_anchor|affect anchor|喜欢它的原因|favorite_reason|favorite reason)\s*$.*?(?=^###\s+|\Z)"
+)
 _TEMPERATURE_MEANING_LINE_RE = re.compile(r"(?m)^\s*含义[:：].*(?:\n|$)")
 
 
@@ -605,6 +609,13 @@ def strip_affect_anchor(text: str) -> str:
     if not text:
         return text
     return _AFFECT_ANCHOR_RE.sub("", str(text)).strip()
+
+
+def strip_display_temperature_sections(text: str) -> str:
+    """Remove display-only temperature sections from direct bucket rendering."""
+    if not text:
+        return text
+    return _DISPLAY_TEMPERATURE_SECTION_RE.sub("", str(text)).strip()
 
 
 def strip_temperature_meaning_lines(text: str) -> str:
