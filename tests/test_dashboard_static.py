@@ -104,6 +104,8 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     config_view = html.split('id="config-view"', 1)[1].split('id="detail-panel"', 1)[0]
 
     assert 'data-tab="memory-config"' in html
+    assert html.index('data-tab="config"') < html.index('data-tab="memory-config"')
+    assert html.index('data-tab="memory-config"') < html.index('data-tab="import"')
     assert 'id="memory-config-view"' in html
     assert 'id="memory-config-status"' in html
     assert "<h3>记忆浮现</h3>" in html
