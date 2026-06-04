@@ -347,7 +347,13 @@ def test_gateway_state_store_cooldown_curve(tmp_path):
 def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_config, bucket_mgr):
     app, service, _, _ = _build_service(
         monkeypatch,
-        _gateway_config(test_config, cooldown_hours=6, skip_recent_rounds=5),
+        _gateway_config(
+            test_config,
+            cooldown_hours=6,
+            skip_recent_rounds=5,
+            direct_render_mode="auto",
+            retrieval_mode="graph",
+        ),
         bucket_mgr,
     )
 
@@ -355,13 +361,29 @@ def test_gateway_config_endpoint_updates_memory_cooldown(monkeypatch, test_confi
         response = client.post(
             "/api/config",
             headers={"Authorization": "Bearer gateway-secret"},
-            json={"gateway": {"cooldown_hours": 2.5, "skip_recent_rounds": 3}},
+            json={
+                "gateway": {
+                    "cooldown_hours": 2.5,
+                    "skip_recent_rounds": 3,
+                    "direct_render_mode": "full",
+                    "retrieval_mode": "bucket",
+                }
+            },
         )
 
     assert response.status_code == 200
-    assert response.json()["updated"] == ["gateway.cooldown_hours", "gateway.skip_recent_rounds"]
+    assert response.json()["updated"] == [
+        "gateway.cooldown_hours",
+        "gateway.skip_recent_rounds",
+        "gateway.direct_render_mode",
+        "gateway.retrieval_mode",
+    ]
     assert service.cooldown_hours == pytest.approx(2.5)
     assert service.skip_recent_rounds == 3
+    assert service.direct_render_mode == "full"
+    assert service.retrieval_mode == "bucket"
+    assert response.json()["gateway"]["direct_render_mode"] == "full"
+    assert response.json()["gateway"]["retrieval_mode"] == "bucket"
 
 
 def test_gateway_defaults_openai_session_id(monkeypatch, test_config, bucket_mgr):

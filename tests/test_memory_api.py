@@ -1787,6 +1787,35 @@ async def test_config_get_reports_reflection_affect_anchor_switches(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_config_get_reports_gateway_recall_modes(monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+    monkeypatch.setattr(
+        server,
+        "config",
+        {
+            **server.config,
+            "gateway": {
+                **server.config.get("gateway", {}),
+                "cooldown_hours": 2.5,
+                "skip_recent_rounds": 3,
+                "direct_render_mode": "full",
+                "retrieval_mode": "bucket",
+            },
+        },
+    )
+
+    response = await server.api_config_get(DummyRequest())
+    payload = json.loads(response.body)
+
+    assert payload["gateway"]["cooldown_hours"] == 2.5
+    assert payload["gateway"]["skip_recent_rounds"] == 3
+    assert payload["gateway"]["direct_render_mode"] == "full"
+    assert payload["gateway"]["retrieval_mode"] == "bucket"
+
+
+@pytest.mark.asyncio
 async def test_config_get_reports_memory_diffusion_settings(monkeypatch):
     import server
 
@@ -1836,14 +1865,14 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
     runtime_path.parent.mkdir(exist_ok=True)
     config_path.write_text(
         "dream:\n  model: yaml-old\n"
-        "gateway:\n  cooldown_hours: 48\n  skip_recent_rounds: 9\n"
+        "gateway:\n  cooldown_hours: 48\n  skip_recent_rounds: 9\n  direct_render_mode: auto\n  retrieval_mode: graph\n"
         "memory_diffusion:\n  chain_walk_enabled: false\n  max_hops: 2\n"
         "reflection:\n  memory_affect_anchor_enabled: true\n",
         encoding="utf-8",
     )
     runtime_path.write_text(
         "dream:\n  model: runtime-old\n"
-        "gateway:\n  cooldown_hours: 48\n  skip_recent_rounds: 9\n"
+        "gateway:\n  cooldown_hours: 48\n  skip_recent_rounds: 9\n  direct_render_mode: auto\n  retrieval_mode: graph\n"
         "memory_diffusion:\n  chain_walk_enabled: false\n  max_hops: 2\n"
         "reflection:\n  daily_enabled: false\n  memory_affect_anchor_enabled: true\n",
         encoding="utf-8",
@@ -1862,6 +1891,8 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
             **test_config["gateway"],
             "cooldown_hours": 48,
             "skip_recent_rounds": 9,
+            "direct_render_mode": "auto",
+            "retrieval_mode": "graph",
         },
         "memory_diffusion": {
             "enabled": True,
@@ -1885,7 +1916,10 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
         relationship_weather_affect_anchor_enabled=False,
     )
 
+    hot_update_calls = []
+
     async def fake_hot_update(_body):
+        hot_update_calls.append(dict(_body or {}))
         return "gateway_hot_reloaded"
 
     monkeypatch.setenv("OMBRE_CONFIG_PATH", str(config_path))
@@ -1899,7 +1933,12 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
         DummyRequest(
             {
                 "dream": {"auto_enabled": False, "model": "dream-new"},
-                "gateway": {"cooldown_hours": 6, "skip_recent_rounds": 5},
+                "gateway": {
+                    "cooldown_hours": 6,
+                    "skip_recent_rounds": 5,
+                    "direct_render_mode": "full",
+                    "retrieval_mode": "bucket",
+                },
                 "memory_diffusion": {
                     "enabled": True,
                     "top_k": 3,
@@ -1928,6 +1967,14 @@ async def test_config_persist_syncs_existing_runtime_yaml(monkeypatch, test_conf
     assert runtime_config["dream"]["auto_enabled"] is False
     assert runtime_config["gateway"]["cooldown_hours"] == 6
     assert runtime_config["gateway"]["skip_recent_rounds"] == 5
+    assert runtime_config["gateway"]["direct_render_mode"] == "full"
+    assert runtime_config["gateway"]["retrieval_mode"] == "bucket"
+    assert hot_update_calls[-1] == {
+        "cooldown_hours": 6,
+        "skip_recent_rounds": 5,
+        "direct_render_mode": "full",
+        "retrieval_mode": "bucket",
+    }
     assert runtime_config["memory_diffusion"]["enabled"] is True
     assert runtime_config["memory_diffusion"]["top_k"] == 3
     assert runtime_config["memory_diffusion"]["min_activation"] == 0.22

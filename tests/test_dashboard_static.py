@@ -96,6 +96,8 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert "<h3>记忆浮现</h3>" in html
     assert 'id="cfg-gateway-cooldown"' in html
     assert 'id="cfg-gateway-rounds"' in html
+    assert 'id="cfg-direct-render-mode"' in html
+    assert 'id="cfg-retrieval-mode"' in html
     assert 'id="cfg-diffusion-enabled"' in html
     assert 'id="cfg-diffusion-topk"' in html
     assert 'id="cfg-diffusion-min"' in html
@@ -105,11 +107,15 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert 'id="cfg-chain-frontier"' in html
     assert "cfg.gateway.cooldown_hours" in html
     assert "cfg.gateway.skip_recent_rounds" in html
+    assert "cfg.gateway.direct_render_mode" in html
+    assert "cfg.gateway.retrieval_mode" in html
     assert "cfg.memory_diffusion || {}" in load_block
     assert "diffusion.chain_walk_enabled" in load_block
     assert "diffusion.chain_min_confidence" in load_block
     assert "cooldown_hours: floatValue('cfg-gateway-cooldown', 6)" in html
     assert "skip_recent_rounds: numberValue('cfg-gateway-rounds', 5)" in html
+    assert "direct_render_mode: document.getElementById('cfg-direct-render-mode').value," in html
+    assert "retrieval_mode: document.getElementById('cfg-retrieval-mode').value," in html
     assert "memory_diffusion: {" in save_block
     assert "top_k: numberValue('cfg-diffusion-topk', 4)," in save_block
     assert "min_activation: floatValue('cfg-diffusion-min', 0.18)," in save_block

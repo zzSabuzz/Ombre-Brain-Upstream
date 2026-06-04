@@ -1759,6 +1759,23 @@
       </div>
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 5，就是最近 5 轮浮现过的记忆会优先避开</div>
       <div class="config-row">
+        <label>直命中形状</label>
+        <select id="cfg-direct-render-mode">
+          <option value="auto">auto</option>
+          <option value="compact">compact</option>
+          <option value="full">full</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">auto：短桶原文，长桶窗口，高价值/细节请求用脱水胶囊</div>
+      <div class="config-row">
+        <label>召回模式</label>
+        <select id="cfg-retrieval-mode">
+          <option value="graph">graph</option>
+          <option value="bucket">bucket</option>
+        </select>
+      </div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">graph 是 p0 图召回；bucket 是接近 main 的直命中对照档</div>
+      <div class="config-row">
         <label>图扩散</label>
         <select id="cfg-diffusion-enabled"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
@@ -3705,6 +3722,8 @@ async function loadConfig() {
     document.getElementById('cfg-dream-anchor').value = cfg.dream.identity_anchor_id || '';
     document.getElementById('cfg-gateway-cooldown').value = (cfg.gateway && cfg.gateway.cooldown_hours) ?? 6;
     document.getElementById('cfg-gateway-rounds').value = (cfg.gateway && cfg.gateway.skip_recent_rounds) ?? 5;
+    document.getElementById('cfg-direct-render-mode').value = (cfg.gateway && cfg.gateway.direct_render_mode) || 'auto';
+    document.getElementById('cfg-retrieval-mode').value = (cfg.gateway && cfg.gateway.retrieval_mode) || 'graph';
     var diffusion = cfg.memory_diffusion || {};
     document.getElementById('cfg-diffusion-enabled').value = diffusion.enabled === false ? 'false' : 'true';
     document.getElementById('cfg-diffusion-topk').value = diffusion.top_k ?? 4;
@@ -3767,6 +3786,8 @@ async function saveConfig(persist) {
     gateway: {
       cooldown_hours: floatValue('cfg-gateway-cooldown', 6),
       skip_recent_rounds: numberValue('cfg-gateway-rounds', 5),
+      direct_render_mode: document.getElementById('cfg-direct-render-mode').value,
+      retrieval_mode: document.getElementById('cfg-retrieval-mode').value,
     },
     memory_diffusion: {
       enabled: document.getElementById('cfg-diffusion-enabled').value === 'true',

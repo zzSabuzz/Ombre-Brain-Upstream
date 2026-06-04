@@ -6109,6 +6109,8 @@ async def api_config_get(request):
         "gateway": {
             "cooldown_hours": gateway_cfg.get("cooldown_hours", 6),
             "skip_recent_rounds": gateway_cfg.get("skip_recent_rounds", 5),
+            "direct_render_mode": _normalize_direct_render_mode(gateway_cfg.get("direct_render_mode", "auto")),
+            "retrieval_mode": _normalize_retrieval_mode(gateway_cfg.get("retrieval_mode", "graph")),
         },
         "memory_diffusion": {
             "enabled": diffusion_options.enabled,
@@ -6292,6 +6294,14 @@ async def api_config_update(request):
             gateway_cfg["skip_recent_rounds"] = max(0, int(g["skip_recent_rounds"]))
             gateway_hot_update_body["skip_recent_rounds"] = gateway_cfg["skip_recent_rounds"]
             updated.append("gateway.skip_recent_rounds")
+        if "direct_render_mode" in g:
+            gateway_cfg["direct_render_mode"] = _normalize_direct_render_mode(g["direct_render_mode"])
+            gateway_hot_update_body["direct_render_mode"] = gateway_cfg["direct_render_mode"]
+            updated.append("gateway.direct_render_mode")
+        if "retrieval_mode" in g:
+            gateway_cfg["retrieval_mode"] = _normalize_retrieval_mode(g["retrieval_mode"])
+            gateway_hot_update_body["retrieval_mode"] = gateway_cfg["retrieval_mode"]
+            updated.append("gateway.retrieval_mode")
         hot_update_status = await _hot_update_gateway_config(gateway_hot_update_body)
         if hot_update_status:
             updated.append(hot_update_status)
@@ -6378,6 +6388,10 @@ async def api_config_update(request):
                     sc_gateway["cooldown_hours"] = max(0.0, float(body["gateway"]["cooldown_hours"]))
                 if "skip_recent_rounds" in body["gateway"]:
                     sc_gateway["skip_recent_rounds"] = max(0, int(body["gateway"]["skip_recent_rounds"]))
+                if "direct_render_mode" in body["gateway"]:
+                    sc_gateway["direct_render_mode"] = _normalize_direct_render_mode(body["gateway"]["direct_render_mode"])
+                if "retrieval_mode" in body["gateway"]:
+                    sc_gateway["retrieval_mode"] = _normalize_retrieval_mode(body["gateway"]["retrieval_mode"])
 
             if "memory_diffusion" in body:
                 sc_diffusion = save_config.setdefault("memory_diffusion", {})

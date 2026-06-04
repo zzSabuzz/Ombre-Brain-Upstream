@@ -272,6 +272,8 @@ class GatewayService:
                 "upstream_models": self.upstream_models,
                 "cooldown_hours": self.cooldown_hours,
                 "skip_recent_rounds": self.skip_recent_rounds,
+                "direct_render_mode": self.direct_render_mode,
+                "retrieval_mode": self.retrieval_mode,
                 "reranker": {
                     "enabled": bool(getattr(self.reranker_engine, "enabled", False)),
                     "model": getattr(self.reranker_engine, "model", ""),
@@ -306,6 +308,8 @@ class GatewayService:
         return {
             "cooldown_hours": self.cooldown_hours,
             "skip_recent_rounds": self.skip_recent_rounds,
+            "direct_render_mode": self.direct_render_mode,
+            "retrieval_mode": self.retrieval_mode,
         }
 
     def _apply_gateway_memory_config(self, payload: dict[str, Any]) -> list[str]:
@@ -318,6 +322,14 @@ class GatewayService:
             self.skip_recent_rounds = max(0, int(payload["skip_recent_rounds"]))
             self.gateway_cfg["skip_recent_rounds"] = self.skip_recent_rounds
             updated.append("gateway.skip_recent_rounds")
+        if "direct_render_mode" in payload:
+            self.direct_render_mode = self._normalize_direct_render_mode(payload["direct_render_mode"])
+            self.gateway_cfg["direct_render_mode"] = self.direct_render_mode
+            updated.append("gateway.direct_render_mode")
+        if "retrieval_mode" in payload:
+            self.retrieval_mode = self._normalize_retrieval_mode(payload["retrieval_mode"])
+            self.gateway_cfg["retrieval_mode"] = self.retrieval_mode
+            updated.append("gateway.retrieval_mode")
         return updated
 
     async def handle_config(self, request: Request) -> JSONResponse:
