@@ -71,6 +71,16 @@ def test_strip_temperature_meaning_lines_only_removes_standalone_lines():
     assert "正文里的含义：应该保留。" in cleaned
 
 
+def test_strip_temperature_meaning_lines_removes_inline_chord_tail():
+    text = "> 小雨把旧信放到桌上。 > Dbmaj9 -> Ab/C -> Bbm9 · 60bpm · mp"
+
+    cleaned = strip_temperature_meaning_lines(text)
+
+    assert cleaned == "> 小雨把旧信放到桌上。"
+    assert "Dbmaj9" not in cleaned
+    assert "60bpm" not in cleaned
+
+
 def test_strip_display_temperature_sections_removes_render_only_blocks():
     text = (
         "正文。\n\n"

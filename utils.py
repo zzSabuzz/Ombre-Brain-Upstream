@@ -626,6 +626,13 @@ def _looks_like_temperature_chord_line(line: str) -> bool:
     return not remainder
 
 
+def _strip_inline_temperature_chord_segments(line: str) -> str:
+    match = re.search(r"\s>\s*(.+)$", str(line or ""))
+    if match and _looks_like_temperature_chord_line(">" + match.group(1)):
+        return str(line)[: match.start()].rstrip()
+    return line
+
+
 def strip_affect_anchor(text: str) -> str:
     """Remove the display-only affect anchor block from searchable text."""
     if not text:
@@ -645,10 +652,12 @@ def strip_temperature_meaning_lines(text: str) -> str:
     if not text:
         return text
     cleaned = _TEMPERATURE_MEANING_LINE_RE.sub("", str(text))
-    lines = [
-        line for line in cleaned.splitlines()
-        if not _looks_like_temperature_chord_line(line)
-    ]
+    lines = []
+    for line in cleaned.splitlines():
+        line = _strip_inline_temperature_chord_segments(line)
+        if _looks_like_temperature_chord_line(line):
+            continue
+        lines.append(line)
     return "\n".join(lines).strip()
 
 
