@@ -1490,6 +1490,143 @@ async def test_api_anchor_proposal_confirm_marks_bucket_anchor(monkeypatch, buck
 
 
 @pytest.mark.asyncio
+async def test_identity_semantics_api_rebuilds_aliases_from_evidence_buckets(
+    monkeypatch,
+    bucket_mgr,
+    test_config,
+    tmp_path,
+):
+    import server
+    from identity_semantics import IdentitySemanticStore
+
+    private_path = tmp_path / "private_identity.yaml"
+    private_path.write_text(
+        yaml.safe_dump(
+            {
+                "canonical": {
+                    "private_relation.title_marker": {
+                        "scope": "private_relationship",
+                        "group": "shared",
+                        "seed_aliases": ["专属称呼"],
+                    }
+                }
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    cfg = {
+        **test_config,
+        "identity_semantics": {
+            "enabled": True,
+            "private_config_path": str(private_path),
+        },
+    }
+    anchor_id = await bucket_mgr.create(
+        content="这条 anchor 里出现专属称呼。",
+        name="关系证据",
+        tags=["relationship_event"],
+        anchor=True,
+    )
+    await bucket_mgr.create(
+        content="普通桶也出现专属称呼，但不该作为私有 alias 证据。",
+        name="普通桶",
+    )
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "identity_semantic_store", IdentitySemanticStore(cfg))
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_identity_semantics_rebuild(
+        DummyRequest(body={"include_archive": True, "limit": 10})
+    )
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["status"] == "rebuilt"
+    assert payload["enabled"] is True
+    assert payload["stats"] == {"canonical": 1, "aliases": 1, "evidence": 1}
+    assert payload["aliases"][0]["canonical"] == "private_relation.title_marker"
+    assert payload["aliases"][0]["alias"] == "专属称呼"
+    assert payload["aliases"][0]["evidence_bucket_ids"] == [anchor_id]
+
+    get_response = await server.api_identity_semantics(DummyRequest(query_params={"limit": "10"}))
+    get_payload = json.loads(get_response.body)
+    assert get_payload["aliases"][0]["evidence_bucket_ids"] == [anchor_id]
+
+
+@pytest.mark.asyncio
+async def test_word_map_api_rebuild_excludes_private_identity_seed_terms(
+    monkeypatch,
+    bucket_mgr,
+    test_config,
+    tmp_path,
+):
+    import server
+    from identity_semantics import IdentitySemanticStore
+    from word_map import WordMapStore
+
+    private_path = tmp_path / "private_identity.yaml"
+    private_path.write_text(
+        yaml.safe_dump(
+            {
+                "canonical": {
+                    "private_relation.title_marker": {
+                        "scope": "private_relationship",
+                        "group": "shared",
+                        "seed_aliases": ["专属称呼"],
+                    }
+                }
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    cfg = {
+        **test_config,
+        "identity_semantics": {
+            "enabled": True,
+            "private_config_path": str(private_path),
+        },
+        "word_map": {
+            "enabled": True,
+            "max_terms_per_bucket": 8,
+            "edge_top_k": 6,
+        },
+    }
+    bucket_id = await bucket_mgr.create(
+        content="这段关系里会出现专属称呼，也会出现公共称呼。",
+        name="称呼样例",
+        tags=["relationship_event"],
+        domain=["关系"],
+        extra_metadata={"keywords": ["专属称呼", "公共称呼"]},
+    )
+
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "identity_semantic_store", IdentitySemanticStore(cfg))
+    monkeypatch.setattr(server, "word_map_store", WordMapStore(cfg))
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_word_map_rebuild(
+        DummyRequest(body={"include_archive": True, "nodes": 20, "edges": 20})
+    )
+    payload = json.loads(response.body)
+    terms = {node["term"] for node in payload["nodes"]}
+
+    assert response.status_code == 200
+    assert payload["status"] == "rebuilt"
+    assert "专属称呼" in payload["private_terms_excluded"]
+    assert "专属称呼" not in terms
+    assert "公共称呼" in terms
+
+    cards_response = await server.api_word_map_cards(
+        DummyRequest(query_params={"term": "公共称呼", "limit": "5"})
+    )
+    cards_payload = json.loads(cards_response.body)
+    assert cards_payload["cards"][0]["bucket_id"] == bucket_id
+
+
+@pytest.mark.asyncio
 async def test_streamable_http_startup_helper_starts_decay_engine(monkeypatch):
     import server
 

@@ -68,6 +68,7 @@ from decay_engine import DecayEngine
 from dream_engine import DreamEngine
 from embedding_engine import EmbeddingEngine
 from identity import identity_names
+from identity_semantics import IdentitySemanticStore
 from import_memory import ImportEngine
 from memory_diffusion import (
     diffuse_memory,
@@ -111,6 +112,7 @@ from reflection_engine import ReflectionEngine
 from recall_diagnostics import RecallDiagnosticsLogger
 from reranker_engine import RerankerEngine
 from source_refs import source_ref_window
+from word_map import WordMapStore
 from utils import (
     bucket_text_for_embedding,
     count_tokens_approx,
@@ -145,6 +147,8 @@ memory_moment_store = MemoryMomentStore(config)        # Structured bucket body/
 memory_write_gate = MemoryWriteGate(config)            # Automatic grow gate / 自动写入门卫
 reflection_engine = ReflectionEngine(config)           # Reflection worker / 关系天气与关系整理
 dream_engine = DreamEngine(config)                     # Night dream worker / 夜梦
+identity_semantic_store = IdentitySemanticStore(config) # Private relationship alias index / 私有关系语义索引
+word_map_store = WordMapStore(config)                   # Derived generic word co-occurrence index / 派生通用词图
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -986,6 +990,46 @@ def _bucket_summary_payload(bucket: dict) -> dict:
         "updated_at": meta.get("updated_at", ""),
         "last_active": meta.get("last_active", ""),
         "content_preview": strip_wikilinks(bucket.get("content", ""))[:200],
+    }
+
+
+def _identity_seed_alias_terms() -> set[str]:
+    try:
+        return {
+            str(alias).strip()
+            for node in identity_semantic_store.load_private_nodes()
+            for alias in node.seed_aliases
+            if str(alias).strip()
+        }
+    except Exception as e:
+        logger.warning("Failed to load private identity seed aliases: %s", e)
+        return set()
+
+
+def _refresh_word_map_private_terms() -> list[str]:
+    terms = _identity_seed_alias_terms()
+    if terms:
+        word_map_store.private_terms |= terms
+    return sorted(terms)
+
+
+def _word_map_payload(nodes_limit: int = 50, edges_limit: int = 50) -> dict:
+    return {
+        "enabled": bool(getattr(word_map_store, "enabled", False)),
+        "stats": word_map_store.stats(),
+        "nodes": word_map_store.list_nodes(_int_between(nodes_limit, 50, 1, 500)),
+        "edges": word_map_store.list_edges(_int_between(edges_limit, 50, 1, 500)),
+        "private_terms_excluded": _refresh_word_map_private_terms(),
+    }
+
+
+def _identity_semantics_payload(alias_limit: int = 100) -> dict:
+    aliases = identity_semantic_store.list_aliases()
+    return {
+        "enabled": bool(getattr(identity_semantic_store, "enabled", False)),
+        "private_configured": bool(getattr(identity_semantic_store, "private_config_path", "")),
+        "stats": identity_semantic_store.stats(),
+        "aliases": aliases[: _int_between(alias_limit, 100, 1, 1000)],
     }
 
 
@@ -6778,6 +6822,127 @@ async def api_anchor_proposal_confirm(request):
         "proposal": proposal,
         "bucket": _bucket_summary_payload(updated or bucket),
     })
+
+
+@mcp.custom_route("/api/word-map", methods=["GET"])
+async def api_word_map(request):
+    """Return generic Word Map Lite diagnostics for dashboard review."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        nodes_limit = _int_between(request.query_params.get("nodes"), 50, 1, 500)
+        edges_limit = _int_between(request.query_params.get("edges"), 50, 1, 500)
+        return JSONResponse(_word_map_payload(nodes_limit, edges_limit))
+    except Exception as e:
+        logger.warning("Word Map diagnostics failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/word-map/rebuild", methods=["POST"])
+async def api_word_map_rebuild(request):
+    """Rebuild the generic Word Map Lite index from current buckets."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    try:
+        include_archive = _bool_value(body.get("include_archive"), False)
+        nodes_limit = _int_between(body.get("nodes"), 50, 1, 500)
+        edges_limit = _int_between(body.get("edges"), 50, 1, 500)
+        private_terms = _refresh_word_map_private_terms()
+        buckets = await bucket_mgr.list_all(include_archive=include_archive)
+        stats = word_map_store.rebuild(buckets)
+        payload = _word_map_payload(nodes_limit, edges_limit)
+        payload.update({
+            "status": "rebuilt",
+            "bucket_count": len(buckets),
+            "include_archive": include_archive,
+            "stats": stats,
+            "private_terms_excluded": private_terms,
+        })
+        return JSONResponse(payload)
+    except Exception as e:
+        logger.warning("Word Map rebuild failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/word-map/cards", methods=["GET"])
+async def api_word_map_cards(request):
+    """Return bucket evidence rows for one Word Map term."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    term = str(request.query_params.get("term", "") or "").strip()
+    if not term:
+        return JSONResponse({"error": "missing term parameter"}, status_code=400)
+    limit = _int_between(request.query_params.get("limit"), 20, 1, 200)
+    try:
+        return JSONResponse({
+            "term": term,
+            "cards": word_map_store.cards_for_term(term, limit),
+        })
+    except Exception as e:
+        logger.warning("Word Map cards lookup failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/identity-semantics", methods=["GET"])
+async def api_identity_semantics(request):
+    """Return private identity alias diagnostics for dashboard review."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        limit = _int_between(request.query_params.get("limit"), 100, 1, 1000)
+        return JSONResponse(_identity_semantics_payload(limit))
+    except Exception as e:
+        logger.warning("Identity semantic diagnostics failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/api/identity-semantics/rebuild", methods=["POST"])
+async def api_identity_semantics_rebuild(request):
+    """Rebuild private identity alias evidence from current buckets."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json body must be an object"}, status_code=400)
+    try:
+        include_archive = _bool_value(body.get("include_archive"), False)
+        limit = _int_between(body.get("limit"), 100, 1, 1000)
+        buckets = await bucket_mgr.list_all(include_archive=include_archive)
+        stats = identity_semantic_store.rebuild_alias_index(buckets)
+        payload = _identity_semantics_payload(limit)
+        payload.update({
+            "status": "rebuilt",
+            "bucket_count": len(buckets),
+            "include_archive": include_archive,
+            "stats": stats,
+        })
+        return JSONResponse(payload)
+    except Exception as e:
+        logger.warning("Identity semantic rebuild failed: %s", e, exc_info=True)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @mcp.custom_route("/api/buckets/delete", methods=["POST"])
