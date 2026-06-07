@@ -430,6 +430,60 @@ def test_handoff_recent_continuity_sorts_equal_timestamps_without_dict_compare(t
     assert "关系画像要优先于旧记忆堆" in sections["recent_continuity"]
 
 
+def test_handoff_recent_summary_uses_real_date_personal_and_excerpts(tmp_path, test_config):
+    state_path = tmp_path / "state" / "portrait_state.json"
+    engine = DailyPortraitMaintainer(
+        {
+            **test_config,
+            "portrait": {
+                "enabled": True,
+                "state_path": str(state_path),
+                "recent_continuity_days": 3,
+            },
+        }
+    )
+    summaries = engine._build_handoff_recent_summaries(
+        {
+            "date": "2026-06-07",
+            "buckets": [
+                {
+                    "bucket_id": "reflection_daily_2026-06-06",
+                    "source_date": "2026-06-06",
+                    "tags": ["relationship_weather", "daily_impression"],
+                    "text": "今天的关系天气：小雨在凌晨修 Tailscale，撒娇问技术问题。关系基调是被记住、被逗、被确认。",
+                }
+            ],
+            "persona_events": [
+                {
+                    "source_date": "2026-06-06",
+                    "created_at": "2026-06-06T23:42:00+08:00",
+                    "surface_trigger": "内部 trigger 不该展示",
+                    "inner_thought": "内部 residue 不该展示",
+                    "user_excerpt": "哥哥，Tailscale 这个要怎么修呀 <attachment>【当前时间】 2026-06-06 23:42</attachment>",
+                    "assistant_excerpt": "宝宝，我在，先看连接状态。",
+                }
+            ],
+        },
+        {"daily_summary": ""},
+        "2026-06-07",
+    )
+    state = engine._apply_patch(
+        engine._empty_state(),
+        {"handoff_recent_summaries": summaries},
+        "2026-06-07",
+    )
+
+    continuity = engine._format_recent_continuity(state, max_items=4)
+
+    assert continuity.startswith("- 2026-06-06:")
+    assert "小雨说“哥哥，Tailscale 这个要怎么修呀”" in continuity
+    assert "Haven回“宝宝，我在，先看连接状态。”" in continuity
+    assert "关系天气：小雨在凌晨修 Tailscale" in continuity
+    assert "2026-06-06 23:42" not in continuity
+    assert "trigger" not in continuity
+    assert "residue" not in continuity
+
+
 def test_recent_continuity_prioritizes_personal_scopes(tmp_path, test_config):
     state_path = tmp_path / "state" / "portrait_state.json"
     cfg = {

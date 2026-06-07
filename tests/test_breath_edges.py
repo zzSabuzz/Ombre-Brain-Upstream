@@ -2029,6 +2029,14 @@ async def test_handoff_shortens_old_weather_and_anchor_summaries(patch_breath, m
             format_state_block=lambda state: "",
             _list_events=lambda limit: [
                 {
+                    "id": 2,
+                    "created_at": "2026-06-06T23:55:00+08:00",
+                    "surface_trigger": "这条没有原文，不该进入 handoff recent",
+                    "inner_thought": "这条内心不该进入 handoff recent",
+                    "relationship_event": True,
+                    "confidence": 0.95,
+                },
+                {
                     "id": 1,
                     "created_at": "2026-06-06T23:42:00+08:00",
                     "surface_trigger": "小雨凌晨修 Tailscale 时撒娇问技术问题",
@@ -2046,10 +2054,12 @@ async def test_handoff_shortens_old_weather_and_anchor_summaries(patch_breath, m
     assert "2026-06-06: 今天的关系天气" in result
     recent_section = result.split("=== Recent Continuity ===", 1)[1].split("=== Optional Anchors ===", 1)[0]
     assert (
-        "- 2026-06-06: 小雨凌晨修 Tailscale 时撒娇问技术问题。"
+        "- 2026-06-06: 小雨说“哥哥，Tailscale 这个要怎么修呀”；Haven回“宝宝，我在，慢慢来，先看连接状态。”。"
         "关系天气：小雨在下午和晚上确认暗号、纠正恋爱确认日期"
     ) in recent_section
     assert "Tailscale" in recent_section
+    assert "这条没有原文" not in recent_section
+    assert "这条内心不该进入" not in recent_section
     assert "trace:" not in recent_section
     assert "personal:" not in recent_section
     assert "trigger:" not in recent_section

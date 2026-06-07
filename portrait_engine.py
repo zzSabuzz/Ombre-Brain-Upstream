@@ -198,6 +198,13 @@ class DailyPortraitMaintainer:
             # Initial portrait generation scans broad history; its summary is not a real daily recap.
             normalized_patch["daily_summary"] = ""
             self._demote_initial_old_recent(normalized_patch, materials)
+        handoff_summaries = self._build_handoff_recent_summaries(
+            materials,
+            normalized_patch,
+            date_key,
+        )
+        if handoff_summaries:
+            normalized_patch["handoff_recent_summaries"] = handoff_summaries
         next_state = self._apply_patch(state, normalized_patch, date_key)
         next_state["updated_at"] = self._now_utc()
         next_state.setdefault("runs", []).append(
@@ -611,6 +618,82 @@ class DailyPortraitMaintainer:
             for offset in range(self.recent_continuity_days)
         }
 
+    def _build_handoff_recent_summaries(self, materials: dict, patch: dict, date_key: str) -> dict[str, str]:
+        recent_dates = self._recent_date_keys(date_key)
+        by_date: dict[str, dict[str, list[str] | str]] = {}
+
+        for bucket in materials.get("buckets", []) or []:
+            if not isinstance(bucket, dict):
+                continue
+            source_date = str(bucket.get("source_date") or "").strip()
+            if source_date not in recent_dates:
+                continue
+            tags = {str(tag).lower() for tag in bucket.get("tags", []) or []}
+            if not ({"relationship_weather", "daily_impression"} & tags):
+                continue
+            text = self._handoff_weather_text(bucket)
+            if not text:
+                continue
+            row = by_date.setdefault(source_date, {"weather": "", "excerpts": []})
+            if not row.get("weather"):
+                row["weather"] = text
+
+        for event in materials.get("persona_events", []) or []:
+            if not isinstance(event, dict):
+                continue
+            source_date = str(event.get("source_date") or "").strip()
+            if source_date not in recent_dates:
+                continue
+            phrase = self._handoff_event_excerpt_phrase(event)
+            if not phrase:
+                continue
+            excerpts = by_date.setdefault(source_date, {"weather": "", "excerpts": []})["excerpts"]
+            if isinstance(excerpts, list) and phrase not in excerpts:
+                excerpts.append(phrase)
+
+        summaries: dict[str, str] = {}
+        for summary_date in sorted(by_date.keys(), reverse=True):
+            row = by_date[summary_date]
+            excerpts = row.get("excerpts") if isinstance(row.get("excerpts"), list) else []
+            weather = str(row.get("weather") or "").strip()
+            parts = []
+            if excerpts:
+                parts.append("；".join(excerpts[:2]))
+            if weather:
+                parts.append(f"关系天气：{weather}")
+            summary = "。".join(part.strip("。") for part in parts if part)
+            if summary:
+                summaries[summary_date] = self._clip(summary, 240)
+        return summaries
+
+    def _handoff_weather_text(self, bucket: dict) -> str:
+        text = str(bucket.get("text") or bucket.get("source_excerpt") or "").strip()
+        text = self._clean_fallback_text(text)
+        text = re.sub(r"^今天(?:的)?关系天气[：:]\s*", "", text)
+        text = re.sub(r"^今天[：:]\s*", "", text)
+        return self._clip(text, 180)
+
+    def _handoff_event_excerpt_phrase(self, event: dict) -> str:
+        user_excerpt = self._clean_handoff_excerpt(event.get("user_excerpt"))
+        assistant_excerpt = self._clean_handoff_excerpt(event.get("assistant_excerpt"))
+        user_name = str(self.identity.get("user_display_name") or "用户")
+        ai_name = str(self.identity.get("ai_name") or "AI")
+        parts = []
+        if user_excerpt:
+            parts.append(f"{user_name}说“{user_excerpt}”")
+        if assistant_excerpt:
+            parts.append(f"{ai_name}回“{assistant_excerpt}”")
+        return self._clip("，".join(parts), 150)
+
+    def _clean_handoff_excerpt(self, value: Any, *, max_chars: int = 72) -> str:
+        text = strip_wikilinks(str(value or "")).strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s*<attachment\b[^>]*>.*?</attachment>\s*", " ", text, flags=re.IGNORECASE | re.DOTALL)
+        text = re.sub(r"【当前时间】[^\n\r]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return self._clip(text, max_chars)
+
     def _bucket_source_date(self, meta: dict) -> str:
         explicit = str(meta.get("date") or "").strip()
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", explicit):
@@ -653,6 +736,14 @@ class DailyPortraitMaintainer:
         if patch.get("daily_summary"):
             state.setdefault("daily_summaries", {})[date_key] = patch["daily_summary"]
             state["daily_summaries"] = dict(list(state["daily_summaries"].items())[-90:])
+        if isinstance(patch.get("handoff_recent_summaries"), dict):
+            summaries = state.setdefault("handoff_recent_summaries", {})
+            for summary_date, summary_text in patch["handoff_recent_summaries"].items():
+                summary_date = str(summary_date or "").strip()
+                summary_text = self._clip(summary_text, 240)
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", summary_date) and summary_text:
+                    summaries[summary_date] = summary_text
+            state["handoff_recent_summaries"] = dict(sorted(summaries.items())[-90:])
 
         for item in patch.get("add_recent", []):
             self._upsert_portrait_item(
@@ -779,6 +870,22 @@ class DailyPortraitMaintainer:
 
     def _format_recent_continuity(self, state: dict, *, max_items: int) -> str:
         by_date: dict[str, list[tuple[str, dict]]] = {}
+        handoff = (
+            state.get("handoff_recent_summaries", {})
+            if isinstance(state.get("handoff_recent_summaries"), dict)
+            else {}
+        )
+        handoff_lines = []
+        for date_key in sorted(handoff.keys(), reverse=True)[: self.recent_continuity_days]:
+            summary = str(handoff.get(date_key) or "").strip()
+            if summary:
+                char_limit = 220 if not handoff_lines else 130
+                handoff_lines.append(f"- {date_key}: {self._clip(summary, char_limit)}")
+                if len(handoff_lines) >= max_items:
+                    break
+        if handoff_lines:
+            return "\n".join(dict.fromkeys(handoff_lines))
+
         daily = state.get("daily_summaries", {}) if isinstance(state.get("daily_summaries"), dict) else {}
         for date_key, summary in list(daily.items())[-self.recent_continuity_days:]:
             if str(summary).strip():
@@ -893,6 +1000,8 @@ class DailyPortraitMaintainer:
                     "event_type": str(event.get("event_type") or ""),
                     "perceived_intent": self._clip(event.get("perceived_intent") or "", 120),
                     "inner_thought": self._clip(event.get("inner_thought") or "", 80),
+                    "user_excerpt": self._clip(event.get("user_excerpt") or "", 240),
+                    "assistant_excerpt": self._clip(event.get("assistant_excerpt") or "", 240),
                     "reply_guidance": self._clip(event.get("reply_guidance") or "", 160),
                     "relationship_event": bool(event.get("relationship_event")),
                     "confidence": self._clamp(event.get("confidence"), 0.55),
@@ -1179,6 +1288,7 @@ class DailyPortraitMaintainer:
                 for scope in PORTRAIT_SCOPES
             },
             "daily_summaries": {},
+            "handoff_recent_summaries": {},
             "stable_candidates": [],
             "profile_fact_candidates": [],
             "skipped": [],
@@ -1191,7 +1301,7 @@ class DailyPortraitMaintainer:
                 for scope in PORTRAIT_SCOPES:
                     if isinstance(value.get(scope), dict):
                         base["portrait"][scope].update(value[scope])
-            elif key in {"daily_summaries"} and isinstance(value, dict):
+            elif key in {"daily_summaries", "handoff_recent_summaries"} and isinstance(value, dict):
                 base[key] = value
             elif key in {"stable_candidates", "profile_fact_candidates", "skipped", "runs"} and isinstance(value, list):
                 base[key] = value

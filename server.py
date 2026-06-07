@@ -956,11 +956,20 @@ async def _build_handoff_breath(max_tokens: int = 1200, session_id: str = "", de
         for part in [persona_block, str(portrait_sections.get("persona") or "").strip()]
         if part.strip()
     )
-    recent_continuity = _merge_handoff_recent_continuity(
-        _format_handoff_personal_recent_continuity(all_buckets, limit=3),
-        str(portrait_sections.get("recent_continuity") or "").strip(),
-        max_lines=5,
-    )
+    portrait_recent_continuity = str(portrait_sections.get("recent_continuity") or "").strip()
+    live_recent_continuity = _format_handoff_personal_recent_continuity(all_buckets, limit=3)
+    if _handoff_recent_continuity_is_natural(portrait_recent_continuity):
+        recent_continuity = _merge_handoff_recent_continuity(
+            portrait_recent_continuity,
+            live_recent_continuity,
+            max_lines=5,
+        )
+    else:
+        recent_continuity = _merge_handoff_recent_continuity(
+            live_recent_continuity,
+            portrait_recent_continuity,
+            max_lines=5,
+        )
     if not recent_continuity:
         recent_continuity = _format_handoff_recent_continuity(all_buckets, limit=3)
     anchors = _format_handoff_anchors(all_buckets, limit=2)
@@ -1173,17 +1182,26 @@ def _handoff_persona_trace_for_date(date_key: str, *, limit: int = 2) -> str:
 
 
 def _handoff_persona_event_phrase(event: dict) -> str:
-    trigger = str(event.get("surface_trigger") or event.get("perceived_intent") or "").strip()
-    user_excerpt = str(event.get("user_excerpt") or "").strip()
-    residue = str(event.get("inner_thought") or event.get("residue") or "").strip()
-    if not trigger:
-        trigger = user_excerpt
-    phrase = _clip_text(trigger, 70)
-    if residue and residue not in phrase:
-        phrase = f"{phrase}，{_clip_text(residue, 70)}"
-    phrase = re.sub(r"^她", "小雨", phrase)
-    phrase = phrase.replace("她", "小雨")
-    return _clip_text(phrase, 110)
+    user_excerpt = _handoff_clean_excerpt(event.get("user_excerpt"))
+    assistant_excerpt = _handoff_clean_excerpt(event.get("assistant_excerpt"))
+    parts = []
+    if user_excerpt:
+        parts.append(f"小雨说“{user_excerpt}”")
+    if assistant_excerpt:
+        parts.append(f"Haven回“{assistant_excerpt}”")
+    if not parts:
+        return ""
+    return _clip_text("；".join(parts), 150)
+
+
+def _handoff_clean_excerpt(value: object, *, max_chars: int = 72) -> str:
+    text = strip_wikilinks(str(value or "")).strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s*<attachment\b[^>]*>.*?</attachment>\s*", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"【当前时间】[^\n\r]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return _clip_text(text, max_chars)
 
 
 def _handoff_recent_weather_phrase(text: str, *, max_chars: int = 150) -> str:
@@ -1218,6 +1236,18 @@ def _merge_handoff_recent_continuity(*blocks: str, max_lines: int = 5) -> str:
             if len(lines) >= max_lines:
                 return "\n".join(lines)
     return "\n".join(lines)
+
+
+def _handoff_recent_continuity_is_natural(block: str) -> bool:
+    lines = [line.strip() for line in str(block or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    return any(
+        re.match(r"^-\s+\d{4}-\d{2}-\d{2}:", line)
+        and " / " not in line
+        and not any(label in line for label in ("trace:", "personal:", "trigger:", "residue:"))
+        for line in lines
+    )
 
 
 def _format_handoff_anchors(all_buckets: list[dict], limit: int = 2) -> str:
