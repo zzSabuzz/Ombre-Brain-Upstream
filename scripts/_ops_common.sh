@@ -98,7 +98,15 @@ ombre_update_git_checkout() {
   local remote="${OMBRE_REMOTE:-origin}"
   local current_branch target_branch target_ref target_sha head_sha backup_branch stamp
   current_branch="$(git branch --show-current 2>/dev/null || true)"
-  target_branch="${OMBRE_BRANCH:-${current_branch:-main}}"
+  if [[ -n "${OMBRE_BRANCH:-}" ]]; then
+    target_branch="${OMBRE_BRANCH}"
+  else
+    target_branch="${current_branch:-main}"
+    if [[ "${target_branch}" == archive/* ]]; then
+      echo "Current branch ${target_branch} is an archive branch; update target defaults to main."
+      target_branch="main"
+    fi
+  fi
 
   echo "Update code from ${remote}/${target_branch}..."
   git fetch "${remote}" "${target_branch}"

@@ -483,7 +483,7 @@ curl -sS http://127.0.0.1:18002/health
 COMPOSE_FILE=compose.hk.yml bash scripts/update_deploy.sh
 ```
 
-2026-06-07 之后，旧 `main` 已换到新版主线。老部署目录如果还停在旧 `main`，不要手动普通 `git pull`；优先运行 `bash scripts/one_click.sh` 里的“更新版本”。脚本会先询问是否备份记忆桶，默认备份 `buckets/data`、`state`、`config.yaml` 和 `.env`；更新代码时会在 tracked 文件干净的情况下把旧 HEAD 备份成 `archive/local-main-before-reset-*`，再切到新版 `origin/main`。`.env`、`buckets/`、`state/` 这类未跟踪/挂载文件不会因为 git reset 被删除。
+2026-06-07 之后，旧 `main` 已换到新版主线，旧版留档在 `archive/main-before-p0-20260607`。老部署目录如果还停在旧 `main`，不要手动普通 `git pull`；优先运行 `bash scripts/one_click.sh` 里的“更新版本”。脚本会先询问是否备份记忆桶，默认备份 `buckets/data`、`state`、`config.yaml` 和 `.env`；更新代码时会在 tracked 文件干净的情况下把旧 HEAD 备份成 `archive/local-main-before-reset-*`，再切到新版 `origin/main`。如果当前 checkout 本身就在 `archive/*` 分支，且没有显式设置 `OMBRE_BRANCH`，更新目标也会默认改成 `main`。`.env`、`buckets/`、`state/` 这类未跟踪/挂载文件不会因为 git reset 被删除。
 
 如果 VPS 上有直接改过仓库里的 tracked 文件，脚本会停下。先 `git stash push -u -m pre-deploy-direct-vps-edits-$(date +%Y%m%d-%H%M%S)`，再重新运行更新脚本。
 
