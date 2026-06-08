@@ -283,6 +283,152 @@ class WordMapStore:
         finally:
             conn.close()
 
+    def hint_buckets_for_terms(
+        self,
+        terms: list[str],
+        *,
+        neighbor_limit: int = 6,
+        bucket_limit: int = 12,
+    ) -> dict[str, Any]:
+        """
+        Return weak recall hints from direct word cards and one-hop co-occurrence.
+
+        This is deliberately read-only and evidence-shaped: callers still decide
+        whether a hinted bucket is allowed into visible recall.
+        """
+        if not self.enabled:
+            return _empty_hint_payload()
+
+        cleaned_terms = _unique_terms(self._clean_term(term) for term in terms)
+        if not cleaned_terms:
+            return _empty_hint_payload()
+
+        neighbor_limit = _int_between(neighbor_limit, 6, 0, 40)
+        bucket_limit = _int_between(bucket_limit, 12, 1, 100)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            neighbor_scores = self._hint_neighbor_terms(conn, cleaned_terms, neighbor_limit)
+            term_sources = {term: {"kind": "direct", "weight": 1.0, "sources": [term]} for term in cleaned_terms}
+            for term, info in neighbor_scores.items():
+                term_sources[term] = info
+
+            card_terms = list(term_sources)
+            if not card_terms:
+                return _empty_hint_payload(cleaned_terms)
+            placeholders = ",".join("?" for _ in card_terms)
+            rows = conn.execute(
+                f"""
+                SELECT bucket_id, term, source, kind, weight, updated_at
+                FROM word_card_nodes
+                WHERE term IN ({placeholders})
+                ORDER BY weight DESC, bucket_id ASC
+                """,
+                tuple(card_terms),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        scores: dict[str, float] = {}
+        evidence: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            bucket_id = str(row["bucket_id"] or "").strip()
+            term = str(row["term"] or "").strip()
+            if not bucket_id or term not in term_sources:
+                continue
+            source_info = term_sources[term]
+            try:
+                card_weight = float(row["weight"] or 0.0)
+            except (TypeError, ValueError):
+                card_weight = 0.0
+            contribution = max(0.0, min(1.0, card_weight)) * float(source_info.get("weight", 0.0))
+            if contribution <= 0:
+                continue
+            scores[bucket_id] = min(1.0, scores.get(bucket_id, 0.0) + contribution)
+            bucket_evidence = evidence.setdefault(
+                bucket_id,
+                {
+                    "terms": [],
+                    "direct_terms": [],
+                    "neighbor_terms": [],
+                },
+            )
+            row_payload = {
+                "term": term,
+                "kind": source_info.get("kind", ""),
+                "score": round(contribution, 4),
+                "source_terms": list(source_info.get("sources") or []),
+                "card_source": str(row["source"] or ""),
+            }
+            bucket_evidence["terms"].append(row_payload)
+            target_key = "direct_terms" if source_info.get("kind") == "direct" else "neighbor_terms"
+            if term not in bucket_evidence[target_key]:
+                bucket_evidence[target_key].append(term)
+
+        ranked_ids = sorted(scores, key=lambda bucket_id: (-scores[bucket_id], bucket_id))[:bucket_limit]
+        return {
+            "terms": cleaned_terms,
+            "neighbors": [
+                {
+                    "term": term,
+                    "score": round(float(info.get("weight", 0.0)), 4),
+                    "source_terms": list(info.get("sources") or []),
+                }
+                for term, info in neighbor_scores.items()
+            ],
+            "bucket_scores": {bucket_id: round(scores[bucket_id], 4) for bucket_id in ranked_ids},
+            "evidence": {bucket_id: evidence[bucket_id] for bucket_id in ranked_ids},
+        }
+
+    def _hint_neighbor_terms(
+        self,
+        conn: sqlite3.Connection,
+        source_terms: list[str],
+        neighbor_limit: int,
+    ) -> dict[str, dict[str, Any]]:
+        if neighbor_limit <= 0:
+            return {}
+        neighbors: dict[str, dict[str, Any]] = {}
+        source_set = set(source_terms)
+        for term in source_terms:
+            rows = conn.execute(
+                """
+                SELECT
+                    CASE WHEN term_a = ? THEN term_b ELSE term_a END AS neighbor,
+                    COUNT(*) AS bucket_count,
+                    SUM(weight) AS weight
+                FROM word_edges
+                WHERE term_a = ? OR term_b = ?
+                GROUP BY neighbor
+                ORDER BY bucket_count DESC, weight DESC, neighbor ASC
+                LIMIT ?
+                """,
+                (term, term, term, neighbor_limit),
+            ).fetchall()
+            for row in rows:
+                neighbor = self._clean_term(row["neighbor"])
+                if not neighbor or neighbor in source_set:
+                    continue
+                try:
+                    bucket_count = max(1, int(row["bucket_count"] or 1))
+                    avg_weight = float(row["weight"] or 0.0) / bucket_count
+                except (TypeError, ValueError):
+                    avg_weight = 0.0
+                weight = min(0.55, max(0.05, avg_weight * 0.55))
+                info = neighbors.setdefault(
+                    neighbor,
+                    {"kind": "neighbor", "weight": 0.0, "sources": []},
+                )
+                info["weight"] = max(float(info.get("weight", 0.0)), weight)
+                if term not in info["sources"]:
+                    info["sources"].append(term)
+
+        ranked = sorted(
+            neighbors.items(),
+            key=lambda item: (-float(item[1].get("weight", 0.0)), item[0]),
+        )[:neighbor_limit]
+        return dict(ranked)
+
     def stats(self) -> dict[str, int]:
         conn = sqlite3.connect(self.db_path)
         try:
@@ -385,6 +531,27 @@ def _normalize_term(value: Any) -> str:
     text = re.sub(r"\s+", " ", text)
     text = text.strip("\"'`“”‘’[]【】()（）")
     return text.lower() if re.fullmatch(r"[A-Za-z0-9_.:/ -]+", text) else text
+
+
+def _unique_terms(terms: Any) -> list[str]:
+    output = []
+    seen = set()
+    for term in terms or []:
+        cleaned = str(term or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        output.append(cleaned)
+    return output
+
+
+def _empty_hint_payload(terms: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "terms": terms or [],
+        "neighbors": [],
+        "bucket_scores": {},
+        "evidence": {},
+    }
 
 
 def _identity_stopwords(config: dict[str, Any]) -> list[str]:

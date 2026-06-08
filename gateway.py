@@ -78,6 +78,7 @@ from utils import (
     strip_temperature_meaning_lines,
     strip_wikilinks,
 )
+from word_map import WordMapStore
 
 logger = logging.getLogger("ombre_brain.gateway")
 FAVORITE_MEMORY_MARKER = "[[ombre:favorite]]"
@@ -208,6 +209,7 @@ class GatewayService:
         persona_engine: PersonaStateEngine | None = None,
         dream_engine: DreamEngine | None = None,
         memory_node_store: MemoryNodeStore | None = None,
+        word_map_store: WordMapStore | None = None,
         http_client: httpx.AsyncClient | None = None,
     ):
         self.config = config
@@ -315,6 +317,25 @@ class GatewayService:
         self.related_memory_budget = int(self.gateway_cfg.get("related_memory_budget", 220))
         self.diffusion_options = diffusion_options_from_config(config)
         self.core_memory_interval_rounds = max(0, int(self.gateway_cfg.get("core_memory_interval_rounds", 0)))
+        self.word_map_hint_enabled = self._bool_config_value(
+            self.gateway_cfg.get("word_map_hint_enabled"),
+            False,
+        )
+        self.word_map_hint_weight = self._clamp(float(self.gateway_cfg.get("word_map_hint_weight", 0.08)))
+        self.word_map_hint_moment_boost = self._clamp(
+            float(self.gateway_cfg.get("word_map_hint_moment_boost", 0.25))
+        )
+        self.word_map_hint_neighbor_limit = max(
+            0,
+            min(40, int(self.gateway_cfg.get("word_map_hint_neighbor_limit", 6))),
+        )
+        self.word_map_hint_bucket_limit = max(
+            1,
+            min(100, int(self.gateway_cfg.get("word_map_hint_bucket_limit", 12))),
+        )
+        self.word_map_store = word_map_store if word_map_store is not None else (
+            WordMapStore(config) if self.word_map_hint_enabled else None
+        )
         self.portrait_memory_enabled = self._bool_config_value(
             self.gateway_cfg.get("portrait_memory_enabled"),
             False,
@@ -4645,6 +4666,21 @@ class GatewayService:
         )
         selected_bucket_ids = [bucket["id"] for bucket in selected_buckets if bucket.get("id")]
         bucket_boosts = {bucket_id: 1.0 for bucket_id in selected_bucket_ids}
+        eligible_buckets = [
+            bucket
+            for bucket in all_buckets
+            if str(bucket.get("id") or "") in eligible_ids
+        ]
+        word_map_boost_scores, word_map_boost_debug = self._get_word_map_hint_scores(
+            search_query,
+            eligible_buckets,
+        )
+        word_map_hint_bucket_ids = set(word_map_boost_scores)
+        for bucket_id, score in word_map_boost_scores.items():
+            bucket_boosts[bucket_id] = max(
+                bucket_boosts.get(bucket_id, 0.0),
+                self._clamp(score) * self.word_map_hint_moment_boost,
+            )
         candidates = self.memory_moment_store.search_moments(
             search_query,
             limit=max(20, self.dynamic_top_k * 2, self.inject_max_cards * 8),
@@ -4663,6 +4699,29 @@ class GatewayService:
         suppressed_candidates = []
         for moment in candidates:
             item = dict(moment)
+            bucket_id = str(item.get("bucket_id") or "")
+            if bucket_id in word_map_hint_bucket_ids:
+                hint_debug = word_map_boost_debug.get(bucket_id) or {}
+                item["word_map_hint"] = True
+                item["word_map_score"] = self._clamp(word_map_boost_scores.get(bucket_id, 0.0))
+                item["word_map_terms"] = list(hint_debug.get("direct_terms") or [])
+                item["word_map_neighbor_terms"] = list(hint_debug.get("neighbor_terms") or [])
+            hint_only = bucket_id in word_map_hint_bucket_ids and bucket_id not in admitted_bucket_ids
+            if (
+                hint_only
+                and not self._moment_has_query_topic_evidence(query, item)
+                and not self.recall_policy.has_strong_score(rerank_score=item.get("rerank_score"))
+            ):
+                item["admission_reason"] = "word_map_topic_evidence_missing"
+                item["recall_policy_debug"] = {
+                    "word_map_hint": True,
+                    "word_map_score": item.get("word_map_score"),
+                    "has_topic_evidence": False,
+                    "rerank_score": item.get("rerank_score"),
+                    "auto": True,
+                }
+                suppressed_candidates.append(item)
+                continue
             if self._admit_moment_for_recall(query, item, admitted_bucket_ids=admitted_bucket_ids):
                 admitted_candidates.append(item)
             else:
@@ -5036,8 +5095,7 @@ class GatewayService:
         )
         return any(phrase in text for phrase in phrases)
 
-    @staticmethod
-    def _bucket_is_high_value(bucket: dict) -> bool:
+    def _bucket_is_high_value(self, bucket: dict) -> bool:
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         if meta.get("pinned") or meta.get("protected") or meta.get("anchor"):
             return True
@@ -5893,6 +5951,12 @@ class GatewayService:
             "supplemental": [],
             "suppressed_by_must_terms": [],
             "final_bucket_ids": [],
+            "word_map_hints": {
+                "enabled": self._word_map_hint_available(),
+                "bucket_ids": [],
+                "terms": [],
+                "neighbor_terms": [],
+            },
             "errors": [],
         }
 
@@ -6230,13 +6294,18 @@ class GatewayService:
         candidate_query = search_query or query
         keyword_scores = self._get_keyword_candidates(candidate_query, eligible)
         semantic_scores = await self._get_semantic_candidates(candidate_query, set(bucket_map))
+        word_map_scores, word_map_debug = self._get_word_map_hint_scores(
+            candidate_query,
+            eligible,
+            required_terms=required_terms,
+        )
         lexical_terms = self._planner_lexical_match_terms(required_terms)
         lexical_ids = {
             str(bucket.get("id") or "")
             for bucket in eligible
             if lexical_terms and bucket.get("id") and self._bucket_matches_any_planner_term(bucket, lexical_terms)
         }
-        candidate_ids = set(keyword_scores) | set(semantic_scores) | lexical_ids
+        candidate_ids = set(keyword_scores) | set(semantic_scores) | lexical_ids | set(word_map_scores)
         if not candidate_ids:
             return [], []
 
@@ -6252,6 +6321,7 @@ class GatewayService:
             importance_score = self._clamp(float(meta.get("importance", 5)) / 10.0)
             semantic_score = self._clamp(semantic_scores.get(bucket_id, 0.0))
             keyword_score = self._clamp(keyword_scores.get(bucket_id, 0.0))
+            word_map_score = self._clamp(word_map_scores.get(bucket_id, 0.0))
             lexical_match = bucket_id in lexical_ids
             if lexical_match:
                 keyword_score = max(keyword_score, 1.0)
@@ -6261,6 +6331,7 @@ class GatewayService:
             base_score = (
                 semantic_score * self.semantic_weight
                 + keyword_score * self.keyword_weight
+                + word_map_score * self.word_map_hint_weight
                 + importance_score * self.importance_weight
                 + freshness_score * self.freshness_weight
             ) * relevance_score
@@ -6287,6 +6358,12 @@ class GatewayService:
                     "score": final_score,
                     "semantic_score": semantic_score,
                     "keyword_score": keyword_score,
+                    "word_map_score": word_map_score,
+                    "word_map_hint": bucket_id in word_map_scores,
+                    "word_map_terms": list((word_map_debug.get(bucket_id) or {}).get("direct_terms") or []),
+                    "word_map_neighbor_terms": list(
+                        (word_map_debug.get(bucket_id) or {}).get("neighbor_terms") or []
+                    ),
                     "importance_score": importance_score,
                     "freshness_score": freshness_score,
                     "cooldown_multiplier": cooldown_multiplier,
@@ -6350,6 +6427,7 @@ class GatewayService:
             all_buckets,
             search_query=search_query,
         )
+        self._merge_word_map_hint_debug(planner_debug, active_pool + suppressed_candidates)
         direct_selected = self._pick_dynamic_cards(active_pool)
         selected_items = list(direct_selected)
 
@@ -6384,6 +6462,7 @@ class GatewayService:
                         )
                         supplemental_items.extend(admitted)
                         suppressed_candidates.extend(suppressed)
+                        self._merge_word_map_hint_debug(planner_debug, admitted + suppressed)
                         suppressed_must = [
                             self._format_suppressed_bucket_debug(item, query=short_query)
                             for item in suppressed
@@ -6549,6 +6628,101 @@ class GatewayService:
                 continue
             semantic_scores[bucket_id] = self._clamp(similarity)
         return semantic_scores
+
+    def _word_map_hint_available(self) -> bool:
+        return (
+            bool(self.word_map_hint_enabled)
+            and self.word_map_store is not None
+            and bool(getattr(self.word_map_store, "enabled", False))
+        )
+
+    def _get_word_map_hint_scores(
+        self,
+        query: str,
+        buckets: list[dict],
+        *,
+        required_terms: list[str] | None = None,
+    ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
+        if not self._word_map_hint_available():
+            return {}, {}
+        terms = self.recall_policy.specific_query_terms(query)
+        for term in required_terms or []:
+            cleaned = str(term or "").strip()
+            if cleaned and cleaned not in terms:
+                terms.append(cleaned)
+        if not terms:
+            return {}, {}
+        eligible_ids = {
+            str(bucket.get("id") or "")
+            for bucket in buckets
+            if isinstance(bucket, dict) and bucket.get("id")
+        }
+        if not eligible_ids:
+            return {}, {}
+        try:
+            payload = self.word_map_store.hint_buckets_for_terms(
+                terms,
+                neighbor_limit=self.word_map_hint_neighbor_limit,
+                bucket_limit=self.word_map_hint_bucket_limit,
+            )
+        except Exception as exc:
+            logger.warning("Gateway word map hint lookup failed: %s", exc)
+            return {}, {}
+
+        raw_scores = payload.get("bucket_scores", {}) if isinstance(payload, dict) else {}
+        raw_evidence = payload.get("evidence", {}) if isinstance(payload, dict) else {}
+        scores: dict[str, float] = {}
+        debug: dict[str, dict[str, Any]] = {}
+        for bucket_id, score in raw_scores.items():
+            bucket_id = str(bucket_id or "")
+            if bucket_id not in eligible_ids:
+                continue
+            scores[bucket_id] = self._clamp(score)
+            evidence = raw_evidence.get(bucket_id, {}) if isinstance(raw_evidence, dict) else {}
+            debug[bucket_id] = evidence if isinstance(evidence, dict) else {}
+        return scores, debug
+
+    def _word_map_hint_debug_from_items(self, items: list[dict]) -> dict[str, Any]:
+        payload = {
+            "enabled": self._word_map_hint_available(),
+            "bucket_ids": [],
+            "terms": [],
+            "neighbor_terms": [],
+        }
+        for item in items or []:
+            if not isinstance(item, dict) or not item.get("word_map_hint"):
+                continue
+            bucket = item.get("bucket") if isinstance(item.get("bucket"), dict) else {}
+            bucket_id = str(bucket.get("id") or "")
+            if bucket_id and bucket_id not in payload["bucket_ids"]:
+                payload["bucket_ids"].append(bucket_id)
+            for term in item.get("word_map_terms") or []:
+                if term not in payload["terms"]:
+                    payload["terms"].append(term)
+            for term in item.get("word_map_neighbor_terms") or []:
+                if term not in payload["neighbor_terms"]:
+                    payload["neighbor_terms"].append(term)
+        return payload
+
+    def _merge_word_map_hint_debug(self, target: dict[str, Any], items: list[dict]) -> None:
+        if not isinstance(target, dict):
+            return
+        current = target.setdefault(
+            "word_map_hints",
+            {
+                "enabled": self._word_map_hint_available(),
+                "bucket_ids": [],
+                "terms": [],
+                "neighbor_terms": [],
+            },
+        )
+        incoming = self._word_map_hint_debug_from_items(items)
+        current["enabled"] = bool(current.get("enabled") or incoming.get("enabled"))
+        for key in ("bucket_ids", "terms", "neighbor_terms"):
+            values = current.setdefault(key, [])
+            for value in incoming.get(key) or []:
+                if value not in values:
+                    values.append(value)
 
     def _pick_dynamic_cards(self, scored_candidates: list[dict]) -> list[dict]:
         if not scored_candidates:
@@ -6991,6 +7165,10 @@ class GatewayService:
             "score": self._safe_float(item.get("score"), 0.0),
             "semantic_score": self._safe_float(item.get("semantic_score"), 0.0),
             "keyword_score": self._safe_float(item.get("keyword_score"), 0.0),
+            "word_map_score": self._safe_float(item.get("word_map_score"), 0.0),
+            "word_map_hint": bool(item.get("word_map_hint")),
+            "word_map_terms": list(item.get("word_map_terms") or []),
+            "word_map_neighbor_terms": list(item.get("word_map_neighbor_terms") or []),
             "rerank_score": (
                 self._safe_float(item.get("rerank_score"), 0.0)
                 if item.get("rerank_score") is not None
@@ -7027,6 +7205,10 @@ class GatewayService:
                 if moment.get("rerank_score") is not None
                 else None
             ),
+            "word_map_score": self._safe_float(moment.get("word_map_score"), 0.0),
+            "word_map_hint": bool(moment.get("word_map_hint")),
+            "word_map_terms": list(moment.get("word_map_terms") or []),
+            "word_map_neighbor_terms": list(moment.get("word_map_neighbor_terms") or []),
             "layer_debug": moment_layer_debug(moment, explicit_lookup=explicit_lookup),
             "runtime_gate": self._moment_runtime_gate_payload(
                 moment,

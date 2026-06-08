@@ -66,6 +66,34 @@ def test_word_map_rebuild_creates_nodes_edges_and_bucket_evidence(tmp_path):
     assert ("夏天", "空调") in edge_pairs or ("空调", "夏天") in edge_pairs
 
 
+def test_word_map_hint_buckets_include_direct_and_neighbor_evidence(tmp_path):
+    store = WordMapStore(_config(tmp_path))
+    store.rebuild(
+        [
+            _bucket(
+                "a",
+                "夏天很热，所以小雨开了空调。",
+                name="夏天空调",
+                keywords=["夏天", "空调"],
+                domain=["生活"],
+            ),
+            _bucket(
+                "b",
+                "夏天也会想到冰美式。",
+                name="夏天咖啡",
+                keywords=["夏天", "冰美式"],
+                domain=["生活"],
+            ),
+        ]
+    )
+
+    hints = store.hint_buckets_for_terms(["空调"], neighbor_limit=4, bucket_limit=10)
+
+    assert hints["bucket_scores"]["a"] > hints["bucket_scores"]["b"]
+    assert "空调" in hints["evidence"]["a"]["direct_terms"]
+    assert "夏天" in hints["evidence"]["b"]["neighbor_terms"]
+
+
 def test_word_map_private_terms_are_excluded(tmp_path):
     store = WordMapStore(_config(tmp_path, private_terms=["专属称呼"]))
     store.rebuild(

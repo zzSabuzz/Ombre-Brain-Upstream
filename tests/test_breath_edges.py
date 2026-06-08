@@ -85,6 +85,24 @@ class DummyRerankerEngine:
         return results[:top_n] if top_n else results
 
 
+class DummyWordMapStore:
+    enabled = True
+
+    def __init__(self, payload: dict):
+        self.payload = payload
+        self.calls = []
+
+    def hint_buckets_for_terms(self, terms, *, neighbor_limit=6, bucket_limit=12):
+        self.calls.append(
+            {
+                "terms": list(terms or []),
+                "neighbor_limit": neighbor_limit,
+                "bucket_limit": bucket_limit,
+            }
+        )
+        return self.payload
+
+
 class FakeBucketManager:
     def __init__(self, buckets: list[dict], search_ids: list[str] | None = None):
         self.buckets = {bucket["id"]: bucket for bucket in buckets}
@@ -922,6 +940,75 @@ async def test_short_emotion_phrase_uses_lexical_bucket_seed_when_search_misses(
     assert "=== 直接命中记忆 ===" in result
     assert "[bucket_id:A]" in result
     assert "Haven终于能用记忆工具" in result
+
+
+@pytest.mark.asyncio
+async def test_search_uses_word_map_hint_without_showing_neighbor_only_candidate(
+    monkeypatch,
+    patch_breath,
+):
+    import server
+
+    direct_id = "A"
+    neighbor_id = "B"
+    patch_breath(
+        [
+            _bucket(
+                direct_id,
+                "夏天很热，所以小雨开了空调。",
+                name="夏天空调",
+                importance=8,
+            ),
+            _bucket(
+                neighbor_id,
+                "夏天也会想到冰美式。",
+                name="夏天咖啡",
+                importance=8,
+            ),
+        ],
+        search_ids=[],
+        embedding_engine=DummyEmbeddingEngine([]),
+    )
+    cfg = dict(server.config)
+    gateway_cfg = dict(cfg.get("gateway") or {})
+    gateway_cfg.update(
+        {
+            "word_map_hint_enabled": True,
+            "word_map_hint_moment_boost": 0.25,
+            "word_map_hint_neighbor_limit": 4,
+            "word_map_hint_bucket_limit": 10,
+        }
+    )
+    cfg["gateway"] = gateway_cfg
+    word_map_store = DummyWordMapStore(
+        {
+            "terms": ["空调"],
+            "neighbors": [{"term": "夏天", "score": 0.3, "source_terms": ["空调"]}],
+            "bucket_scores": {direct_id: 1.0, neighbor_id: 0.3},
+            "evidence": {
+                direct_id: {"direct_terms": ["空调"], "neighbor_terms": []},
+                neighbor_id: {"direct_terms": [], "neighbor_terms": ["夏天"]},
+            },
+        }
+    )
+    monkeypatch.setattr(server, "config", cfg)
+    monkeypatch.setattr(server, "word_map_store", word_map_store)
+
+    result = await server.breath(
+        query="空调",
+        max_results=2,
+        max_tokens=500,
+        include_related=False,
+        debug=True,
+    )
+
+    direct_block = result.split("=== suppressed_candidates ===", 1)[0]
+    assert word_map_store.calls
+    assert "[bucket_id:A]" in direct_block
+    assert "夏天很热" in direct_block
+    assert "[bucket_id:B]" not in direct_block
+    assert "reason=word_map_topic_evidence_missing" in result
+    assert "word_map=0.3" in result
 
 
 @pytest.mark.asyncio

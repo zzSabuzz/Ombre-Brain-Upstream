@@ -6580,6 +6580,73 @@ def test_recent_round_skip_prefers_unseen_candidate(monkeypatch, test_config, bu
     assert "猫抓板" not in injected
 
 
+def test_word_map_hint_boosts_moment_search_without_visible_hint_only_recall(
+    monkeypatch, test_config, bucket_mgr
+):
+    from word_map import WordMapStore
+
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        query_planner_enabled=False,
+        retrieval_mode="graph",
+        first_card_min_score=0.35,
+        word_map_hint_enabled=True,
+        word_map_hint_weight=0.08,
+        word_map_hint_moment_boost=0.25,
+    )
+    cfg["word_map"] = {
+        "enabled": True,
+        "max_terms_per_bucket": 8,
+        "edge_top_k": 6,
+        "min_term_len": 2,
+        "stopwords": [],
+        "private_terms": [],
+        "stopword_prefixes": [],
+    }
+    direct_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n夏天很热，所以小雨开了空调。",
+        name="夏天空调",
+        hours_ago=12,
+        keywords=["夏天", "空调"],
+    )
+    neighbor_id = _create_bucket(
+        bucket_mgr,
+        content="### moment\n夏天也会想到冰美式。",
+        name="夏天咖啡",
+        hours_ago=12,
+        keywords=["夏天", "冰美式"],
+    )
+    all_buckets = _run(bucket_mgr.list_all())
+    word_map_store = WordMapStore(cfg)
+    word_map_store.rebuild(all_buckets)
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    service.word_map_store = word_map_store
+
+    all_moments, grouped_moments, _ = service._refresh_moment_graph(all_buckets)
+    assert all_moments
+    selected, candidates, suppressed, suppressed_buckets, planner_debug = _run(
+        service._select_dynamic_moments(
+            "空调",
+            "sess-word-map",
+            all_buckets,
+            grouped_moments,
+            include_query_planner_debug=True,
+        )
+    )
+
+    assert [moment["bucket_id"] for moment in selected] == [direct_id]
+    assert neighbor_id in {moment["bucket_id"] for moment in candidates + suppressed}
+    suppressed_neighbor = next(moment for moment in suppressed if moment["bucket_id"] == neighbor_id)
+    assert suppressed_neighbor["admission_reason"] == "word_map_topic_evidence_missing"
+    assert suppressed_neighbor["word_map_hint"] is True
+    assert neighbor_id in planner_debug["word_map_hints"]["bucket_ids"]
+    assert neighbor_id not in [bucket.get("id") for bucket in suppressed_buckets]
+
+
 def test_high_confidence_match_survives_cooldown_after_recent_window(
     monkeypatch, test_config, bucket_mgr
 ):
