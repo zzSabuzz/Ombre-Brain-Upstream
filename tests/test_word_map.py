@@ -165,6 +165,14 @@ def test_word_map_overview_hides_meta_and_broad_terms_without_hiding_cards(tmp_p
                 domain=["AI", "编程"],
             ),
             _bucket(
+                "generic-title",
+                "Haven MCP 接入与记忆配置过程记录。",
+                name="Haven MCP接入与记忆配置",
+                tags=["project_event", "commitment"],
+                keywords=["MCP", "记忆配置"],
+                domain=["AI", "编程"],
+            ),
+            _bucket(
                 "daily",
                 "日印象记录关系天气。",
                 name="2026-06-08 日印象",
@@ -191,8 +199,13 @@ def test_word_map_overview_hides_meta_and_broad_terms_without_hiding_cards(tmp_p
     assert "1a57d19ef4f9" not in overview_terms
     assert all("日印象" not in term for term in overview_terms)
     assert "暗房" in overview_terms
+    assert "darkroom" not in overview_terms
     assert "流星" in overview_terms
-    assert "记忆不是表演" in {node["term"] for node in overview[:5]}
+    top_terms = {node["term"] for node in overview[:5]}
+    assert "记忆不是表演" in top_terms
+    assert "暗房" in top_terms
+    darkroom_node = next(node for node in overview if node["term"] == "暗房")
+    assert "darkroom" in darkroom_node["aliases"]
     assert all("overview_score" in node for node in overview)
 
     overview_edge_terms = {
@@ -286,6 +299,8 @@ def test_config_example_exposes_empty_word_map_and_identity_semantics():
     assert config["word_map"]["private_terms"] == []
     assert config["word_map"]["overview_stopwords"] == []
     assert config["word_map"]["overview_stopword_prefixes"] == []
+    assert config["word_map"]["overview_aliases"] == {}
+    assert config["word_map"]["overview_priority_terms"] == []
     assert config["word_map"]["weak_hint_terms"] == []
     assert config["word_map"]["weak_hint_weight"] == 0.25
     assert config["identity_semantics"]["enabled"] is False

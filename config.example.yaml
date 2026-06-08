@@ -207,6 +207,8 @@ word_map:
   stopword_prefixes: []               # Extra prefixes such as custom_ / 额外前缀
   overview_stopwords: []              # Extra terms hidden from Top Nodes/Edges only; cards and recall hints are unaffected
   overview_stopword_prefixes: []      # Extra prefixes hidden from Top Nodes/Edges only
+  overview_aliases: {}                # Display-only canonical aliases, e.g. {"darkroom": "暗房"}
+  overview_priority_terms: []         # Extra terms to boost in Top Nodes, without changing recall
   weak_hint_terms: []                  # Extra broad terms whose word-map hints should not one-hop expand
   weak_hint_weight: 0.25               # Direct hint weight for weak terms; keyword recall is unaffected
 

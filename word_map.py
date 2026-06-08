@@ -138,6 +138,28 @@ DEFAULT_WORD_MAP_OVERVIEW_STOPWORDS = {
     "ritual",
 }
 DEFAULT_OVERVIEW_STOPWORD_PREFIXES = DEFAULT_STOPWORD_PREFIXES
+DEFAULT_OVERVIEW_ALIASES = {
+    "darkroom": "暗房",
+    "darkroom door": "暗房",
+    "ombre": "Ombre-Brain",
+    "ombre-brain": "Ombre-Brain",
+    "ombre_brain": "Ombre-Brain",
+    "mcp": "MCP",
+    "dashboard": "Dashboard",
+    "codex": "Codex",
+}
+DEFAULT_OVERVIEW_PRIORITY_TERMS = {
+    "darkroom",
+    "ombre-brain",
+    "recall_cues",
+    "暗房",
+    "忱孚",
+    "折角",
+    "梦境机制",
+    "流星",
+    "第一行代码",
+    "记忆不是表演",
+}
 DEFAULT_WEAK_HINT_TERMS = {
     "人机恋",
     "恋爱",
@@ -200,6 +222,19 @@ class WordMapStore:
             )
             if str(item).strip()
         )
+        self.overview_aliases = {
+            _normalize_term(key): str(value).strip()
+            for key, value in itertools.chain(
+                DEFAULT_OVERVIEW_ALIASES.items(),
+                (cfg.get("overview_aliases", {}) or {}).items(),
+            )
+            if _normalize_term(key) and str(value).strip()
+        }
+        self.overview_priority_terms = {
+            _normalize_term(item)
+            for item in itertools.chain(DEFAULT_OVERVIEW_PRIORITY_TERMS, cfg.get("overview_priority_terms", []) or [])
+            if _normalize_term(item)
+        }
         self.weak_hint_terms = {
             _normalize_term(item)
             for item in itertools.chain(DEFAULT_WEAK_HINT_TERMS, cfg.get("weak_hint_terms", []) or [])
@@ -329,25 +364,52 @@ class WordMapStore:
             rows = conn.execute(
                 """
                 SELECT
+                    bucket_id,
                     term,
-                    CASE
-                        WHEN SUM(CASE WHEN kind = 'subject' THEN 1 ELSE 0 END) > 0
-                            THEN 'subject'
-                        ELSE 'keyword'
-                    END AS kind,
-                    COUNT(DISTINCT bucket_id) AS bucket_count,
-                    SUM(weight) AS weight,
-                    MAX(weight) AS max_weight,
-                    MAX(updated_at) AS updated_at
+                    source,
+                    kind,
+                    weight,
+                    updated_at
                 FROM word_card_nodes
-                GROUP BY term
                 """
             ).fetchall()
-            output = []
+            grouped: dict[str, dict[str, Any]] = {}
             for row in rows:
-                item = dict(row)
-                if self._is_overview_term_hidden(item.get("term")):
+                raw_term = str(row["term"] or "").strip()
+                if self._is_overview_term_hidden(raw_term):
                     continue
+                term = self._overview_canonical_term(raw_term)
+                if self._is_overview_term_hidden(term):
+                    continue
+                item = grouped.setdefault(
+                    term,
+                    {
+                        "term": term,
+                        "kind": "keyword",
+                        "bucket_ids": set(),
+                        "weight": 0.0,
+                        "max_weight": 0.0,
+                        "sources": set(),
+                        "aliases": set(),
+                        "updated_at": str(row["updated_at"] or ""),
+                    },
+                )
+                item["bucket_ids"].add(str(row["bucket_id"] or ""))
+                weight = float(row["weight"] or 0.0)
+                item["weight"] = float(item["weight"]) + weight
+                item["max_weight"] = max(float(item["max_weight"]), weight)
+                item["sources"].add(str(row["source"] or ""))
+                if str(row["kind"] or "") == "subject" or str(row["source"] or "") in {"subject", "name"}:
+                    item["kind"] = "subject"
+                if raw_term != term:
+                    item["aliases"].add(raw_term)
+                item["updated_at"] = max(str(item["updated_at"] or ""), str(row["updated_at"] or ""))
+
+            output = []
+            for item in grouped.values():
+                item["bucket_count"] = len(item.pop("bucket_ids"))
+                item["sources"] = sorted(item["sources"])
+                item["aliases"] = sorted(item["aliases"])
                 item["overview_score"] = self._overview_node_score(item)
                 output.append(item)
             output.sort(
@@ -369,18 +431,40 @@ class WordMapStore:
         try:
             rows = conn.execute(
                 """
-                SELECT term_a, term_b, COUNT(*) AS bucket_count, SUM(weight) AS weight
+                SELECT term_a, term_b, bucket_id, weight, updated_at
                 FROM word_edges
-                GROUP BY term_a, term_b
                 """
             ).fetchall()
-            output = []
+            grouped: dict[tuple[str, str], dict[str, Any]] = {}
             for row in rows:
-                item = dict(row)
-                if self._is_overview_term_hidden(item.get("term_a")):
+                left = str(row["term_a"] or "").strip()
+                right = str(row["term_b"] or "").strip()
+                if self._is_overview_term_hidden(left) or self._is_overview_term_hidden(right):
                     continue
-                if self._is_overview_term_hidden(item.get("term_b")):
+                left = self._overview_canonical_term(left)
+                right = self._overview_canonical_term(right)
+                if self._is_overview_term_hidden(left) or self._is_overview_term_hidden(right):
                     continue
+                if left == right:
+                    continue
+                term_a, term_b = sorted((left, right))
+                item = grouped.setdefault(
+                    (term_a, term_b),
+                    {
+                        "term_a": term_a,
+                        "term_b": term_b,
+                        "bucket_ids": set(),
+                        "weight": 0.0,
+                        "updated_at": str(row["updated_at"] or ""),
+                    },
+                )
+                item["bucket_ids"].add(str(row["bucket_id"] or ""))
+                item["weight"] = float(item["weight"]) + float(row["weight"] or 0.0)
+                item["updated_at"] = max(str(item["updated_at"] or ""), str(row["updated_at"] or ""))
+
+            output = []
+            for item in grouped.values():
+                item["bucket_count"] = len(item.pop("bucket_ids"))
                 item["overview_score"] = self._overview_edge_score(item)
                 output.append(item)
             output.sort(
@@ -670,24 +754,89 @@ class WordMapStore:
             return True
         return False
 
-    @staticmethod
-    def _overview_node_score(item: dict[str, Any]) -> float:
+    def _overview_canonical_term(self, value: Any) -> str:
+        term = _normalize_term(value)
+        return self.overview_aliases.get(term, str(value or "").strip())
+
+    def _overview_node_score(self, item: dict[str, Any]) -> float:
         try:
             max_weight = float(item.get("max_weight") or item.get("weight") or 0.0)
             bucket_count = max(1, int(item.get("bucket_count") or 1))
         except (TypeError, ValueError):
             return 0.0
-        subject_bonus = 1.35 if item.get("kind") == "subject" else 1.0
-        return round(max_weight * subject_bonus / (bucket_count ** 0.35), 4)
+        term = str(item.get("term") or "")
+        sources = set(item.get("sources") or [])
+        source_bonus = self._overview_source_bonus(sources)
+        specificity_bonus = self._overview_specificity_bonus(term, sources)
+        coverage_factor = 1.0 / (bucket_count ** 0.42)
+        return round(max_weight * coverage_factor * specificity_bonus * source_bonus, 4)
 
-    @staticmethod
-    def _overview_edge_score(item: dict[str, Any]) -> float:
+    def _overview_edge_score(self, item: dict[str, Any]) -> float:
         try:
             weight = float(item.get("weight") or 0.0)
             bucket_count = max(1, int(item.get("bucket_count") or 1))
         except (TypeError, ValueError):
             return 0.0
-        return round(weight / (bucket_count ** 0.35), 4)
+        term_bonus = (
+            self._overview_specificity_bonus(str(item.get("term_a") or ""), set())
+            + self._overview_specificity_bonus(str(item.get("term_b") or ""), set())
+        ) / 2.0
+        return round(weight * term_bonus / (bucket_count ** 0.42), 4)
+
+    @staticmethod
+    def _overview_source_bonus(sources: set[str]) -> float:
+        if {"subject", "name"} & sources:
+            return 1.35
+        if "keyword" in sources:
+            return 1.25
+        if "tfidf" in sources:
+            return 1.0
+        if "tag" in sources:
+            return 0.65
+        if "domain" in sources:
+            return 0.35
+        return 0.8
+
+    def _overview_specificity_bonus(self, term: str, sources: set[str]) -> float:
+        normalized = _normalize_term(term)
+        if not normalized:
+            return 0.0
+        score = 1.0
+        if normalized in self.overview_priority_terms:
+            score *= 1.8
+        if re.search(r"[_-]", normalized) or re.search(r"[A-Za-z].*\d|\d.*[A-Za-z]", term):
+            score *= 1.25
+        if re.search(r"[A-Za-z]", term) and re.search(r"[\u4e00-\u9fff]", term):
+            score *= 1.18
+        if any(marker in term for marker in ("机制", "暗房", "流星", "折角", "代码", "梦境", "显影", "外部", "验证")):
+            score *= 1.28
+        chinese_chars = re.findall(r"[\u4e00-\u9fff]", term)
+        if chinese_chars:
+            if len(chinese_chars) <= 6:
+                score *= 1.16
+            elif len(chinese_chars) >= 10 and {"subject", "name"} & sources:
+                score *= 0.52
+        if {"subject", "name"} & sources and any(
+            marker in term
+            for marker in (
+                "上线",
+                "配置",
+                "接入",
+                "调试",
+                "计划",
+                "待完成",
+                "偏好",
+                "调整",
+                "问题",
+                "恢复",
+                "确认",
+                "系统",
+            )
+        ):
+            score *= 0.68
+        if normalized in {"mcp", "dashboard", "codex"}:
+            score *= 0.78
+        return round(score, 4)
 
 
 def _bucket_text(bucket: dict[str, Any]) -> str:
