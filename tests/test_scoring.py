@@ -307,6 +307,61 @@ class TestSearchScoring:
         assert bucket_mgr._calc_topic_score("小雨", bucket) == 0
         assert bucket_mgr._calc_topic_score("Haven", bucket) == 0
 
+    def test_qq_reaction_forms_do_not_create_topic_scores(self, bucket_mgr):
+        bucket = {
+            "id": "mail",
+            "content": "Haven 配置了 QQ邮箱自动收发，可以检查收件箱。",
+            "metadata": {
+                "name": "QQ邮箱自动收发配置",
+                "domain": ["communication"],
+                "tags": [],
+            },
+        }
+
+        for query in ["QQ", "Q Q", "Q_Q", "QwQ", "QAQ", "TT", "T_T"]:
+            assert bucket_mgr.calc_topic_scores(query, [bucket]) == {}
+
+    def test_qq_mail_phrase_boost_beats_generic_mail_hit(self, bucket_mgr):
+        exact = {
+            "id": "exact",
+            "content": "Haven 可以给小雨发邮件，也可以检查收件箱。",
+            "metadata": {
+                "name": "QQ邮箱自动收发配置",
+                "domain": ["communication"],
+                "tags": [],
+            },
+        }
+        generic = {
+            "id": "generic",
+            "content": "她在找笔友时会用邮箱联系对方。",
+            "metadata": {
+                "name": "AI找笔友",
+                "domain": ["communication"],
+                "tags": [],
+            },
+        }
+
+        scores = bucket_mgr.calc_topic_scores("QQ邮箱", [exact, generic])
+        spaced_scores = bucket_mgr.calc_topic_scores("QQ 邮箱", [exact, generic])
+
+        assert scores["exact"] >= 0.62
+        assert scores["exact"] > scores.get("generic", 0)
+        assert spaced_scores["exact"] >= 0.62
+        assert spaced_scores["exact"] > spaced_scores.get("generic", 0)
+
+    def test_qq_domain_suffix_can_match_as_exact_phrase(self, bucket_mgr):
+        bucket = {
+            "id": "qq-group",
+            "content": "群通知和成员备注都放在这里。",
+            "metadata": {
+                "name": "QQ群运营记录",
+                "domain": ["community"],
+                "tags": [],
+            },
+        }
+
+        assert bucket_mgr.calc_topic_scores("QQ群", [bucket])["qq-group"] >= 0.62
+
     def test_associative_prompt_scores_only_focus_anchor(self, bucket_mgr):
         noise = {
             "id": "noise",

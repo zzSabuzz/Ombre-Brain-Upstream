@@ -112,6 +112,13 @@ GENERIC_LEXICAL_STOPWORDS = {
     "things",
     "with",
     "you",
+    "qq",
+    "q_q",
+    "qaq",
+    "qwq",
+    "qvq",
+    "tt",
+    "t_t",
 }
 
 
@@ -863,6 +870,7 @@ class BucketManager:
         if not query_terms:
             return {}
 
+        query_phrase = self._lexical_query_phrase(query)
         docs = []
         document_frequency: Counter[str] = Counter()
         for bucket in buckets:
@@ -870,7 +878,8 @@ class BucketManager:
             if not bucket_id:
                 continue
             term_frequency, doc_length = self._bucket_lexical_profile(bucket)
-            docs.append((bucket_id, term_frequency, doc_length))
+            phrase_score = self._lexical_phrase_boost(bucket, query_phrase)
+            docs.append((bucket_id, term_frequency, doc_length, phrase_score))
             present = set(term_frequency)
             for term in query_terms:
                 if term in present:
@@ -880,13 +889,13 @@ class BucketManager:
             return {}
 
         total_docs = len(docs)
-        avg_doc_length = sum(doc_length for _bid, _tf, doc_length in docs) / max(1, total_docs)
+        avg_doc_length = sum(doc_length for _bid, _tf, doc_length, _phrase in docs) / max(1, total_docs)
         avg_doc_length = max(avg_doc_length, 1.0)
         k1 = 1.4
         b = 0.72
         scores: dict[str, float] = {}
 
-        for bucket_id, term_frequency, doc_length in docs:
+        for bucket_id, term_frequency, doc_length, phrase_score in docs:
             raw_score = 0.0
             for term in query_terms:
                 tf = float(term_frequency.get(term, 0.0))
@@ -899,9 +908,10 @@ class BucketManager:
                     continue
                 raw_score += idf * (tf * (k1 + 1.0)) / denominator
 
-            if raw_score <= 0:
+            if raw_score <= 0 and phrase_score <= 0:
                 continue
-            scores[bucket_id] = round(self._normalize_bm25_score(raw_score), 4)
+            base_score = self._normalize_bm25_score(raw_score) if raw_score > 0 else 0.0
+            scores[bucket_id] = round(max(base_score, phrase_score), 4)
         return scores
 
     def _calc_topic_score(self, query: str, bucket: dict) -> float:
@@ -946,10 +956,40 @@ class BucketManager:
 
     def _lexical_query_terms(self, query: str) -> list[str]:
         terms = self._lexical_tokens(query)
-        compact = self._compact_lexical_phrase(query)
-        if compact and len(compact) <= 32 and not self._is_lexical_stop_term(compact):
+        compact = self._lexical_query_phrase(query)
+        if compact:
             terms.append(compact)
         return list(dict.fromkeys(terms))
+
+    def _lexical_query_phrase(self, query: str) -> str:
+        compact = self._compact_lexical_phrase(query)
+        if not compact or len(compact) > 32 or self._is_lexical_stop_term(compact):
+            return ""
+        if re.fullmatch(r"[\u4e00-\u9fff]+", compact) and len(compact) < 3:
+            return ""
+        if re.fullmatch(r"[a-z0-9_.:-]+", compact):
+            if re.fullmatch(r"[\d.:-]+", compact):
+                return ""
+            if len(compact) < 3 and not re.search(r"\d", compact):
+                return ""
+        return compact
+
+    def _lexical_phrase_boost(self, bucket: dict, query_phrase: str) -> float:
+        if not query_phrase or len(query_phrase) < 3:
+            return 0.0
+        meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        checks = (
+            (meta.get("name"), 0.62),
+            (" ".join(str(item) for item in meta.get("domain", []) or []), 0.56),
+            (" ".join(str(item) for item in meta.get("tags", []) or []), 0.54),
+            (self._bucket_searchable_content(bucket), 0.48),
+        )
+        best = 0.0
+        for value, score in checks:
+            compact = self._compact_lexical_phrase(value)
+            if compact and query_phrase in compact:
+                best = max(best, score)
+        return best
 
     def _lexical_tokens(self, text: str) -> list[str]:
         raw = str(text or "")
