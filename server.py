@@ -4667,6 +4667,13 @@ BREATH_LEXICAL_GENERIC_TERMS = {
     "今天", "昨天", "刚才", "刚刚", "这次", "现在", "最近", "记忆", "回忆",
     "原因", "为什么", "知道", "记得", "想起", "想起来", "什么", "事情",
 }
+BREATH_LEXICAL_CONTEXTUAL_GENERIC_TERMS = {
+    "工作",
+}
+BREATH_LEXICAL_CAREER_ANCHOR_TERMS = {
+    "找工作", "求职", "面试", "简历", "投递", "岗位", "招聘", "实习",
+    "入职", "离职", "被裁", "裁员", "offer", "hr",
+}
 
 
 def _breath_lexical_match_terms(query: str) -> list[str]:
@@ -4678,6 +4685,7 @@ def _breath_lexical_match_terms(query: str) -> list[str]:
     for term in BREATH_LEXICAL_EMOTION_TERMS:
         if term in compact:
             terms.append(term)
+    has_specific_career_anchor = any(term in compact for term in BREATH_LEXICAL_CAREER_ANCHOR_TERMS)
     for term in _recall_policy().specific_query_terms(text):
         cleaned = str(term or "").strip()
         if not cleaned:
@@ -4689,6 +4697,8 @@ def _breath_lexical_match_terms(query: str) -> list[str]:
                 break
         key = collapsed.lower()
         if len(key) < 2 or key in BREATH_LEXICAL_GENERIC_TERMS:
+            continue
+        if has_specific_career_anchor and key in BREATH_LEXICAL_CONTEXTUAL_GENERIC_TERMS:
             continue
         if re.fullmatch(r"[\u4e00-\u9fff]+", collapsed) and len(collapsed) < 2:
             continue

@@ -136,7 +136,7 @@ def test_career_query_filters_unrelated_sleep_memory():
     sleep_memory = relevance_decision(
         "找工作 工作 面试",
         {
-            "text": "凌晨一点五十二分，小雨还在调试，Haven催她睡觉她嘴上答应手没停。",
+            "text": "凌晨一点五十二分，小雨还在调试工作流，Haven催她睡觉她嘴上答应手没停。",
             "metadata": {"bucket_name": "小雨熬夜调试 2026-06-10"},
         },
     )

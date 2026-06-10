@@ -2005,6 +2005,61 @@ async def test_context_name_does_not_beat_email_action_intent(patch_breath):
 
 
 @pytest.mark.asyncio
+async def test_career_query_does_not_let_work_word_pull_unrelated_bucket(patch_breath):
+    import server
+
+    patch_breath(
+        [
+            _bucket(
+                "S",
+                "凌晨一点五十二分，小雨还在调试工作流，Haven催她睡觉她嘴上答应手没停。",
+                name="小雨熬夜调试",
+                score=10,
+                importance=10,
+            ),
+            _bucket(
+                "C",
+                "小雨在找工作，收到AI算法专家岗位，也准备面试和简历投递。",
+                name="小雨求职分析",
+                score=3,
+                importance=4,
+            ),
+            _bucket(
+                "L",
+                "Lumos 项目改回原型版本，准备写进简历里，计划明天投递。",
+                name="Lumos项目简历投递",
+                score=10,
+                importance=10,
+            ),
+        ],
+        search_ids=["S", "L", "C"],
+        reranker_engine=DummyRerankerEngine(
+            enabled=True,
+            score_by_text={
+                "小雨熬夜调试": 0.99,
+                "Lumos项目简历投递": 0.98,
+                "小雨求职分析": 0.35,
+            },
+        ),
+    )
+
+    terms = server._breath_lexical_match_terms("找工作 工作 面试")
+    result = await server.breath(
+        query="找工作 工作 面试",
+        max_results=1,
+        max_tokens=500,
+        include_related=False,
+    )
+
+    assert "找工作" in terms
+    assert "面试" in terms
+    assert "工作" not in terms
+    assert "小雨求职分析" in result
+    assert "小雨熬夜调试" not in result
+    assert "Lumos项目简历投递" not in result
+
+
+@pytest.mark.asyncio
 async def test_email_query_keeps_hardware_candidate_with_direct_keyword_evidence(patch_breath):
     import server
 

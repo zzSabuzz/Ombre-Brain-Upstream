@@ -254,6 +254,7 @@ DEFAULT_CONFLICTS = {
     "embodiment": ("intimacy",),
     "communication_action": ("hardware_protocol",),
 }
+CAREER_GENERIC_DIRECT_TERMS = frozenset({"工作"})
 
 TECHNICAL_RECALL_STRONG_TERMS = frozenset(
     {
@@ -708,6 +709,12 @@ def relevance_decision(
 
     reasons = []
     direct_query_evidence = _has_direct_query_evidence(query, node, options)
+    career_direct_query_evidence = _has_direct_query_evidence(
+        query,
+        node,
+        options,
+        ignored_terms=CAREER_GENERIC_DIRECT_TERMS,
+    )
     overlap = query_active & node_active
 
     if "old_or_resolved" in node_active and "old_or_resolved" not in query_active:
@@ -771,7 +778,7 @@ def relevance_decision(
         multiplier = min(multiplier, 0.45)
         reasons.append("communication_action_missing_demoted")
 
-    if "career" in query_active and "career" not in node_active and not direct_query_evidence:
+    if "career" in query_active and "career" not in node_active and not career_direct_query_evidence:
         return RelevanceDecision(
             0.0,
             query_facets,
@@ -828,8 +835,15 @@ def recall_rank(
             return 0, -score
         return 15, -score
     if "career" in query_active:
-        if "career" in node_active:
+        if _direct_query_evidence_terms(
+            query,
+            node,
+            options,
+            ignored_terms=CAREER_GENERIC_DIRECT_TERMS,
+        ):
             return 0, -score
+        if "career" in node_active:
+            return 4, -score
         return 18, -score
     if "relationship_identity" in query_active and "relationship_identity" in node_active:
         return 0, -score
@@ -978,14 +992,31 @@ def _has_direct_query_evidence(
     query: str,
     node: dict,
     options: MemoryRelevanceOptions,
+    *,
+    ignored_terms: frozenset[str] | set[str] | tuple[str, ...] = (),
 ) -> bool:
+    return bool(_direct_query_evidence_terms(query, node, options, ignored_terms=ignored_terms))
+
+
+def _direct_query_evidence_terms(
+    query: str,
+    node: dict,
+    options: MemoryRelevanceOptions,
+    *,
+    ignored_terms: frozenset[str] | set[str] | tuple[str, ...] = (),
+) -> list[str]:
     node_text = _normalize_text(_node_text(node))
     if not node_text:
-        return False
+        return []
+    ignored = {_normalize_alias(term) for term in ignored_terms or ()}
+    matched = []
     for term in content_terms_for_query(query, options):
-        if _contains_alias(node_text, _normalize_alias(term)):
-            return True
-    return False
+        normalized = _normalize_alias(term)
+        if normalized in ignored:
+            continue
+        if _contains_alias(node_text, normalized):
+            matched.append(term)
+    return matched
 
 
 def _node_text(node: dict) -> str:
