@@ -893,6 +893,11 @@ docker compose -f compose.hk.yml exec -T ombre-brain python scripts/apply_feel_c
 docker compose -f compose.hk.yml exec -T ombre-brain python scripts/apply_feel_comment_backfill.py --mapping /state/feel_comment_backfill_mapping.json --apply --archive-feel --refresh-embeddings
 docker compose -f compose.hk.yml exec -T ombre-brain python scripts/cleanup_migrated_feel_buckets.py
 docker compose -f compose.hk.yml exec -T ombre-brain python scripts/cleanup_migrated_feel_buckets.py --apply
+
+# v1/v2 分开部署时，一次性迁移 bucket Markdown 文件和 frontmatter comments。
+# 推荐先走 ./ob -> 从原版 Ombre-Brain 迁移 -> 预演迁移 buckets/comments。
+python scripts/migrate_bucket_files.py --source /path/to/v1/buckets --target-buckets-dir /srv/ombre-brain/buckets --output /srv/ombre-brain/state/bucket_file_migration_plan.json
+python scripts/migrate_bucket_files.py --source /path/to/v1/buckets --target-buckets-dir /srv/ombre-brain/buckets --target-state-dir /srv/ombre-brain/state --apply --yes --refresh-moments
 ```
 
 脚本用途：
@@ -911,7 +916,7 @@ docker compose -f compose.hk.yml exec -T ombre-brain python scripts/cleanup_migr
 - Python 直跑用户可以从 `scripts/one_click.sh` 的“向量库相关”菜单执行补向量、重建向量、清孤儿向量和导入重复桶清理，不需要 Docker Compose。
 - 导入重复桶清理：不要直接删全部桶。优先在 Dashboard 的“导入 -> 导入结果”里删除/标为噪声；需要批量处理时先备份 `buckets/state`，再用 `scripts/cleanup_duplicate_buckets.py` 扫描。扫描结果会打印重复桶前两句话和相似度；`--interactive --near-threshold 80` 会逐组确认，疑似重复按 `y` 删除建议项、按 `1/2` 删除左/右；`--delete --yes` 只会一键删除 exact duplicate 中安全的一份并清对应 embedding。
 - Dashboard 桶列表多选删除：适合按筛选结果批量删普通动态桶。入口是“批量选择 -> 全选当前筛选 -> 删除选中”，会要求输入 `DELETE`，后端会写 tombstone 并清理 embedding、moment、node、edge 索引；受保护、钉选、长期锚点和 permanent bucket 会被跳过。
-- 原版迁移菜单：先检查旧部署、备份 buckets/state，再生成旧 `feel` 审阅表和 mapping。如果二改版目录和原版目录不同，可以选“备份指定原版目录”，手动填写原版仓库路径，脚本会只打包其中的 `buckets/`、`state/`、`config.yaml`、`.env`。可以逐条输入 `y` 接受候选源记忆，输入 `n` 自己填源记忆 bucket id，或输入 `w` 保留为 whisper/无源 feel。旧 `feel` 写入年轮前必须预演 mapping；清理旧独立 `feel` 前也会要求先看 dry-run。
+- 原版迁移菜单：先检查旧部署、备份 buckets/state，再生成旧 `feel` 审阅表和 mapping。如果二改版目录和原版目录不同，可以选“备份指定原版目录”，手动填写原版仓库路径，脚本会只打包其中的 `buckets/`、`state/`、`config.yaml`、`.env`。可以逐条输入 `y` 接受候选源记忆，输入 `n` 自己填源记忆 bucket id，或输入 `w` 保留为 whisper/无源 feel。旧 `feel` 写入年轮前必须预演 mapping；清理旧独立 `feel` 前也会要求先看 dry-run。v1 和 v2 分开部署时，可以用“预演/应用迁移 buckets/comments”把 v1 的 Markdown bucket 文件原样复制到当前 v2，保留正文、frontmatter comments、创建时间和自定义元数据；同 ID 冲突默认不覆盖，应用前会先备份当前部署，迁移后可刷新 moment 索引，再按需要补缺失向量。
 
 `doctor.sh` 常见结论：
 

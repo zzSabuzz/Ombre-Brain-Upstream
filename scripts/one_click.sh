@@ -1383,6 +1383,67 @@ migration_state_dir() {
   fi
 }
 
+compose_host_volume_for() {
+  local container_path="$1"
+  local compose_file="${2:-${COMPOSE_FILE:-}}"
+  [[ -n "${compose_file}" && -f "${compose_file}" ]] || return 1
+  awk -v target="${container_path}" '
+    /^[[:space:]]*-[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+      gsub(/^["'\'']|["'\'']$/, "", line)
+      split(line, parts, ":")
+      if (length(parts) >= 2 && parts[2] == target) {
+        print parts[1]
+        exit
+      }
+    }
+  ' "${compose_file}"
+}
+
+abs_path_from_compose() {
+  local path="$1"
+  local compose_file="${2:-${COMPOSE_FILE:-}}"
+  [[ -n "${path}" ]] || return 1
+  case "${path}" in
+    /*) printf '%s\n' "${path}" ;;
+    ./*|../*)
+      local compose_dir
+      compose_dir="$(cd "$(dirname "${compose_file}")" 2>/dev/null && pwd -P)" || return 1
+      (cd "${compose_dir}" && cd "$(dirname "${path}")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "${path}")")
+      ;;
+    *) printf '%s\n' "${path}" ;;
+  esac
+}
+
+migration_default_target_buckets_dir() {
+  if [[ "${DEPLOY_TARGET}" == "python" ]]; then
+    printf '%s/buckets\n' "$(pwd -P)"
+    return 0
+  fi
+  local host_path
+  host_path="$(compose_host_volume_for "/data" "${COMPOSE_FILE}" || true)"
+  if [[ -n "${host_path}" ]]; then
+    abs_path_from_compose "${host_path}" "${COMPOSE_FILE}" || true
+    return 0
+  fi
+  printf '/srv/ombre-brain/buckets\n'
+}
+
+migration_default_target_state_dir() {
+  if [[ "${DEPLOY_TARGET}" == "python" ]]; then
+    printf '%s/state\n' "$(pwd -P)"
+    return 0
+  fi
+  local host_path
+  host_path="$(compose_host_volume_for "/state" "${COMPOSE_FILE}" || true)"
+  if [[ -n "${host_path}" ]]; then
+    abs_path_from_compose "${host_path}" "${COMPOSE_FILE}" || true
+    return 0
+  fi
+  printf '/srv/ombre-brain/state\n'
+}
+
 migration_mapping_path() {
   printf '%s/feel_comment_backfill_mapping.json\n' "$(migration_state_dir)"
 }
@@ -1830,6 +1891,78 @@ migration_cleanup_feels_apply() {
   printf '清理结果：%s\n' "${output}"
 }
 
+migration_bucket_files_prompt() {
+  local mode="$1"
+  local source_dir target_buckets target_state report python_cmd
+  local include_tombstones="n"
+  local overwrite="n"
+  local refresh_moments="y"
+
+  migration_prepare_target "${mode}" || return 1
+  ensure_python_tools || return 1
+  python_cmd="$(detect_python_cmd)" || return 1
+
+  source_dir="$(prompt_text 'v1 原部署目录或 buckets 目录' '')"
+  if [[ -z "${source_dir}" ]]; then
+    printf '源目录不能为空。\n'
+    return 1
+  fi
+  if [[ ! -d "${source_dir}" ]]; then
+    printf '源目录不存在：%s\n' "${source_dir}"
+    return 1
+  fi
+
+  target_buckets="$(prompt_text 'v2 目标 buckets 目录' "$(migration_default_target_buckets_dir)")"
+  target_state="$(prompt_text 'v2 目标 state 目录（刷新 moment 索引用）' "$(migration_default_target_state_dir)")"
+  report="$(prompt_text 'JSON 报告输出路径' "${target_state}/bucket_file_migration_plan.json")"
+
+  if prompt_yes_no '包含 .tombstones 删除记录吗' 'n'; then
+    include_tombstones="y"
+  fi
+
+  if [[ "${mode}" == *"应用"* ]]; then
+    if prompt_yes_no '同 ID 内容不同也覆盖 v2 吗' 'n'; then
+      overwrite="y"
+    fi
+    if ! prompt_yes_no '确认已经看过 dry-run 报告，可以迁移吗' 'n'; then
+      return 0
+    fi
+    backup_current_deployment "pre_bucket_file_migration" || return 1
+    if ! prompt_yes_no '迁移后刷新 moment 索引吗' 'y'; then
+      refresh_moments="n"
+    fi
+  fi
+
+  local cmd=(
+    "${python_cmd}"
+    "scripts/migrate_bucket_files.py"
+    "--source" "${source_dir}"
+    "--target-buckets-dir" "${target_buckets}"
+    "--target-state-dir" "${target_state}"
+    "--output" "${report}"
+  )
+  [[ "${include_tombstones}" == "y" ]] && cmd+=("--include-tombstones")
+  if [[ "${mode}" == *"应用"* ]]; then
+    cmd+=("--apply" "--yes")
+    [[ "${overwrite}" == "y" ]] && cmd+=("--overwrite")
+    [[ "${refresh_moments}" == "y" ]] && cmd+=("--refresh-moments")
+  fi
+
+  PYTHONIOENCODING=utf-8 "${cmd[@]}" || return 1
+  printf '迁移报告：%s\n' "${report}"
+  if [[ "${mode}" == *"应用"* ]]; then
+    printf '如需语义召回立刻生效，再到“向量库相关”里补缺失向量。\n'
+  fi
+}
+
+migration_bucket_files_plan() {
+  migration_bucket_files_prompt "迁移 buckets/comments 预演"
+}
+
+migration_bucket_files_apply() {
+  migration_bucket_files_prompt "迁移 buckets/comments 应用"
+}
+
 migration_menu() {
   local choice
   while true; do
@@ -1846,8 +1979,10 @@ migration_menu() {
     printf '9. 迁移后重建向量库\n'
     printf '10. 预演清理已迁移旧 feel\n'
     printf '11. 删除已迁移旧 feel\n'
+    printf '12. 预演迁移 buckets/comments 到当前 v2\n'
+    printf '13. 应用迁移 buckets/comments 到当前 v2\n'
     printf '0. 返回上一级\n'
-    if ! read -r -p '输入（0-11）：' choice; then
+    if ! read -r -p '输入（0-13）：' choice; then
       printf '\n'
       return 0
     fi
@@ -1863,8 +1998,10 @@ migration_menu() {
       9) migration_rebuild_embeddings; pause ;;
       10) migration_cleanup_feels_dry_run; pause ;;
       11) migration_cleanup_feels_apply; pause ;;
+      12) migration_bucket_files_plan; pause ;;
+      13) migration_bucket_files_apply; pause ;;
       0) return 0 ;;
-      *) printf '请输入 0-11。\n' ;;
+      *) printf '请输入 0-13。\n' ;;
     esac
   done
 }
