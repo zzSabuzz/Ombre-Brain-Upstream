@@ -1516,6 +1516,38 @@ def _has_memory_section(content: str, section: str) -> bool:
     return False
 
 
+_GROW_DIRECT_SECTION_HEADINGS = {
+    "moment",
+    "original",
+    "reflection",
+    "assistantreflection",
+    "havenreflection",
+    "followup",
+    "affectanchor",
+}
+
+
+def _is_grow_direct_content(content: str) -> bool:
+    """Detect already-curated memory text that should not be digested again."""
+    text = strip_wikilinks(str(content or ""))
+    for match in re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", text):
+        if _normalize_section_heading(match.group(1)) in _GROW_DIRECT_SECTION_HEADINGS:
+            return True
+    return False
+
+
+def _title_from_memory_heading(content: str) -> str:
+    text = strip_wikilinks(str(content or ""))
+    for match in re.finditer(r"(?m)^\s{0,3}#{1,6}\s+(.+?)\s*$", text):
+        heading = str(match.group(1) or "").strip()
+        if not heading:
+            continue
+        if _normalize_section_heading(heading) in _GROW_DIRECT_SECTION_HEADINGS:
+            continue
+        return _clip_text(heading, 48)
+    return ""
+
+
 def _leading_body_text(content: str) -> str:
     raw = str(content or "").strip()
     if not raw:
@@ -3021,6 +3053,7 @@ async def _merge_or_create(
             bucket["metadata"].get("pinned")
             or bucket["metadata"].get("protected")
             or bucket["metadata"].get("type") == "feel"
+            or _is_profile_fact_bucket(bucket)
         ):
             try:
                 merged = await dehydrator.merge(bucket["content"], content)
@@ -6983,6 +7016,57 @@ def _looks_like_operit_auto_grow_content(content: str) -> bool:
     return bool(re.match(r"^【\d{4}-\d{2}-\d{2} \d{2}:\d{2}】\s*\n", str(content or "")))
 
 
+async def _grow_direct_structured_content(content: str, title: str = "", gate_prefix: str = "") -> str:
+    direct_content = str(content or "").strip()
+    try:
+        analysis = await dehydrator.analyze(direct_content)
+    except Exception as e:
+        logger.warning(f"Direct grow auto-tagging failed, using defaults / 直接写入打标失败: {e}")
+        analysis = {
+            "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
+            "tags": [], "suggested_name": "",
+        }
+
+    tags = analysis.get("tags", []) if isinstance(analysis.get("tags", []), list) else []
+    classification = normalize_write_classification(
+        memory_subject=analysis.get("memory_subject", ""),
+        memory_layer=analysis.get("memory_layer", ""),
+        tags=tags,
+        content=direct_content,
+    )
+    if _has_favorite_tag(tags) and not _has_favorite_reason(direct_content):
+        return _favorite_reason_error()
+
+    try:
+        importance = max(1, min(10, int(analysis.get("importance", 5))))
+    except (TypeError, ValueError):
+        importance = 5
+    domain = analysis.get("domain", ["未分类"])
+    if not isinstance(domain, list):
+        domain = ["未分类"]
+    name = title.strip() or _title_from_memory_heading(direct_content) or analysis.get("suggested_name", "")
+    related_bucket = await _find_readonly_related_bucket(direct_content)
+
+    bucket_id = await bucket_mgr.create(
+        content=direct_content,
+        tags=tags,
+        importance=importance,
+        domain=domain,
+        valence=analysis.get("valence", 0.5),
+        arousal=analysis.get("arousal", 0.3),
+        name=name or None,
+        extra_metadata=_memory_classification_metadata(
+            classification["memory_subject"],
+            classification["memory_layer"],
+            classification["memory_classification_source"],
+        ),
+    )
+    _queue_embedding_refresh(bucket_id)
+    _queue_memory_enrichment(bucket_id)
+    related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
+    return f"{gate_prefix}1条|新1合0\n📝{name or bucket_id}{related_note}"
+
+
 @mcp.tool()
 async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
     """把筛过的长片段拆成少量长期记忆；单条事实优先 hold，旧记忆补感受优先 comment_bucket。title 可选，短内容时传了就用你给的标题。content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor（只放和弦温度线），没有的部分不写。"""
@@ -7006,6 +7090,10 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
         if not gate_decision.allow:
             return _format_write_gate_result(gate_decision)
     gate_prefix = f"{_format_write_gate_result(gate_decision)}\n" if gate_decision else ""
+    content = str(content or "").strip()
+    if _is_grow_direct_content(content):
+        return await _grow_direct_structured_content(content, title=title, gate_prefix=gate_prefix)
+
     content = _normalize_memory_sections_for_write(content)
 
     # --- Short content fast path: skip digest, use hold logic directly ---
