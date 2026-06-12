@@ -167,14 +167,18 @@ darkroom/           # 私密暗房笔记
 2. bucket 会被解析成 moment，写入 `memory_moments.sqlite`。
 3. 同桶 moment 会生成 `next_context / previous_context / emotional_echo / reflects_on` 这类局部上下文边。
 4. `memory_edges.jsonl` 里的显式 bucket 边会桥接到代表 moment。
-5. 当前 query 先经过关键词、embedding、reranker、Query Planner 和 RecallPolicy，得到少数可靠 direct seed。
-6. seed 再沿 moment/bucket 边做带权扩散，得到 `Diffused Memory`，只按摘要和路径提示注入。
+5. Gateway 会先保留两份 query 视图：`raw_query` 是用户原句，`normalized_query` 是去掉称呼、口头词和弱前缀后的主题查询。
+6. `raw_query` 继续用于 embedding、reranker 和 RecallPolicy 准入判断；`normalized_query` 只用于关键词、alias、Word Map Lite 提示和短 lexical 锚点。清洗后没有具体主题时，这些 lexical 路线会直接跳过。
+7. 当前 query 再经过候选汇总、可选 reranker、Query Planner 补搜和 RecallPolicy，得到少数可靠 direct seed。
+8. seed 再沿 moment/bucket 边做带权扩散，得到 `Diffused Memory`，只按摘要和路径提示注入。
 
 这里和最初的“图结构记忆如何浮现”备忘相比，有几处已经收紧：
 
 - `comment`、`affect_anchor`、`favorite_reason` 会进索引，但属于 context-only section；它们不能单独当 direct seed，也不能单独证明一个 bucket 与 query 相关。
 - vague query 会被 `RecallPolicy.is_auto_query_too_vague()` 拦住；Gateway/Bridge 自动注入不会因为一句泛泛的“想起来了吗”硬捞语义 top1。
+- Query 双视图只分开“原句语义”和“主题词锚点”，不绕过准入判断；例如只剩语气或情绪词时，keyword / word_map 不会硬凑 direct seed。
 - `Diffused Memory` 必须从可靠 direct seed 出发；明确主题 query 还要有 topic evidence。联想结果是背景提示，不是当前事实。
+- reranker 仍然是候选重排序层，保留在 raw query 路线上；它不替代 RecallPolicy，也不需要从配置里删掉。
 - `Recent Context`、`Just Now Chat Context`、`Date Persona Trace` 和图扩散是不同层。刚刚/上一句优先走短时 `conversation_turns`，日期问题优先给小段日期 trace。
 - `breath(mode="handoff")` / 新窗口 handoff 不跑动态图扩散；它读自我入口、User Portrait、Relationship Portrait、Recent Continuity 和少量 Optional Anchors。
 - Word Map Lite 只是派生词图和诊断视图，默认不参与 Gateway 注入；它不是替代 `memory_edges` 的主图。
@@ -281,6 +285,7 @@ cp config.example.yaml /srv/ombre-brain/config.yaml
 - `gateway.recalled_memory_budget`：`Recalled Memory` 直命中预算，默认 `400`。
 - `gateway.related_memory_budget`：`Diffused Memory` 扩散背景预算，默认 `220`；设 `0` 可关闭 Gateway 扩散注入。
 - `gateway.direct_render_mode` / `retrieval_mode`：控制直命中展示形状和 `graph|bucket` 召回路线；默认 `auto` + `graph`。
+- Gateway recall 内部会拆成 `raw_query` / `normalized_query` 双视图；这是代码行为，不是配置项。原句语义、reranker 和准入判断仍看 raw query，关键词/Word Map Lite/短 lexical 锚点看 normalized query。
 - `gateway.portrait_memory_*`：控制 Gateway 是否注入只读画像事实缓存；按 `config.example.yaml` 默认开启，只读取 `profile_fact`，`portrait_memory_include_anchors=true` 时才额外带普通 anchor，永远不读 pinned/protected/self_anchor。
 - `gateway.query_planner_*`：长句或低置信问题可额外拆成 1-3 个短查询；只是补候选，不直接注入。
 - `gateway.memory_detail_recall_*`：可选内部二次取细节，默认关闭；只允许已召回过的 bucket id。
@@ -290,7 +295,7 @@ cp config.example.yaml /srv/ombre-brain/config.yaml
 - `memory_diffusion.*`：控制图扩散、链式扩散、hop 衰减和关系权重；默认启用普通短扩散，可靠链式扩散默认关闭。
 - `word_map.*`：派生词图诊断，默认关闭，不自动注入 Gateway。
 - `embedding.model/base_url`：embedding 模型和地址；key 推荐放 `.env` 的 `OMBRE_EMBEDDING_API_KEY`。
-- `reranker.model/base_url`：召回候选重排序模型；默认 `Qwen/Qwen3-Reranker-4B`，`base_url` 留空时复用 embedding 地址，key 优先读 `OMBRE_RERANKER_API_KEY`，未填则复用 `OMBRE_EMBEDDING_API_KEY`。
+- `reranker.model/base_url`：召回候选重排序模型；默认 `Qwen/Qwen3-Reranker-4B`，`base_url` 留空时复用 embedding 地址，key 优先读 `OMBRE_RERANKER_API_KEY`，未填则复用 `OMBRE_EMBEDDING_API_KEY`。双视图召回后它仍用于 raw query 候选重排；暂时不用时设 `reranker.enabled=false` 或 `OMBRE_RERANKER_ENABLED=false`，不要删除配置键。
 - `write_path.semantic_search_timeout_seconds`：写入时找“只读相关旧记忆”的语义检索最多等待几秒，默认 `3`。网络慢时会跳过语义部分，不影响写入成功。
 - `dream.*`：夜梦后台配置；`surface_enabled` 管 `breath()` 浮现，`inject_enabled` 管 Gateway Dream Context 注入，默认不注入。
 - `identity.*`：改 AI 名、前端用户作者名、prompt 里的用户称呼和亲密称呼。
@@ -520,6 +525,8 @@ COMPOSE_FILE=compose.hk.yml bash scripts/update_deploy.sh
 ```
 
 2026-06-07 之后，旧 `main` 已换到新版主线，旧版留档在 `archive/main-before-p0-20260607`。如果老部署的 `origin` 还指向 `P0luz/Ombre-Brain`，按前面的 `bootstrap_update.sh` 前置脚本先切到二改版主仓，再运行新版菜单。
+
+当前 Dockerfile 会把 `resources/stopwords` 一起打进镜像；如果这个目录缺失，Gateway 的 `normalized_query` 会退化成原句，query 双视图的关键词收紧效果会变弱。
 
 如果 VPS 上有直接改过仓库里的 tracked 文件，脚本会停下。先 `git stash push -u -m pre-deploy-direct-vps-edits-$(date +%Y%m%d-%H%M%S)`，再重新运行更新脚本。
 
