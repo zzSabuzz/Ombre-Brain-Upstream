@@ -57,6 +57,7 @@ def test_dashboard_bucket_detail_can_edit_event_date_separately():
     assert "startBucketDateEdit()" in detail_block
     assert "function dateInputValue(value)" in html
     assert "JSON.stringify({date: newDate})" in date_submit
+    assert "await loadBuckets();" in date_submit
     assert "JSON.stringify({name:" not in date_submit
     assert "JSON.stringify({content:" not in date_submit
 
