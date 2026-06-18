@@ -211,6 +211,7 @@ class DarkroomStore:
             locked = self._locked_payload_unlocked(entry)
             if locked:
                 return locked
+            room_entries = self._room_entries_unlocked(self._entry_room_id(entry), visibility="active")
             return {
                 "status": "visible",
                 "entry_id": entry["id"],
@@ -223,6 +224,21 @@ class DarkroomStore:
                 "visibility": entry.get("visibility", "active"),
                 "locked_until": str(entry.get("locked_until") or ""),
                 "content": entry.get("note", ""),
+                "entries": [
+                    {
+                        "entry_id": item.get("id", ""),
+                        "room_id": self._entry_room_id(item),
+                        "revision": item.get("revision", 1),
+                        "created_at": item.get("created_at", ""),
+                        "completeness": item.get("completeness"),
+                        "mood": item.get("mood", ""),
+                        "tags": item.get("tags", []),
+                        "visibility": item.get("visibility", "active"),
+                        "locked_until": str(item.get("locked_until") or ""),
+                        "content": item.get("note", ""),
+                    }
+                    for item in room_entries
+                ],
             }
 
     def continue_context(self, limit: int = 3) -> dict:
@@ -411,6 +427,23 @@ class DarkroomStore:
     def _last_room_unlocked(self, *, visibility: str = "active") -> dict | None:
         rooms = self._current_room_entries_unlocked(visibility=visibility)
         return rooms[-1] if rooms else None
+
+    def _room_entries_unlocked(self, room_id: str, *, visibility: str | None = None) -> list[dict]:
+        target = str(room_id or "").strip()
+        if not target:
+            return []
+        entries = [
+            entry
+            for entry in self._iter_entries_unlocked(visibility=None)
+            if self._entry_room_id(entry) == target
+        ]
+        if visibility is not None:
+            entries = [
+                entry
+                for entry in entries
+                if str(entry.get("visibility") or "active") == visibility
+            ]
+        return entries
 
     def _recent_entries_unlocked(self, limit: int = 3, *, visibility: str = "active") -> list[dict]:
         recent: list[dict] = []

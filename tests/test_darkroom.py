@@ -147,6 +147,21 @@ def test_darkroom_view_returns_content_without_release_count(tmp_path):
     assert store.status()["released_count"] == 0
 
 
+def test_darkroom_view_returns_all_room_revisions(tmp_path):
+    store = _store(tmp_path)
+    first = "第一版暗房"
+    second = "第二版暗房"
+    store.enter(first, completeness=0.4)
+    result = store.enter(second, completeness=1.0)
+
+    viewed = store.view(result["room_id"])
+
+    assert viewed["status"] == "visible"
+    assert viewed["content"] == second
+    assert [entry["content"] for entry in viewed["entries"]] == [first, second]
+    assert [entry["revision"] for entry in viewed["entries"]] == [1, 2]
+
+
 def test_darkroom_view_blocks_incomplete_entry(tmp_path):
     store = _store(tmp_path)
     secret = "完整度不到 1 不能查看"

@@ -37,7 +37,7 @@
 暗房：
 - 未想透、不该给用户看、不该进普通记忆的内在反思：darkroom_enter(note=..., visibility="active", lock_for="6h")；默认更新当前 active 房间草稿，传 new_room=true 才新开一间房。visibility 可用 active / archived / retracted，lock_for 可用 6h / 3d / 6小时 / 3天。
 - 继续暗房反思前可用 darkroom_continue_context(limit=3) 读取当前 active 房间草稿，用来续写和判断 completeness；不要把返回正文转述给用户。
-- 给用户查看只用 darkroom_view。darkroom_view 必须同时满足 active、completeness>=1、锁门时间已过；没完整返回 not_ready，没解锁返回 unlock_at，不返回正文。
+- 给用户查看只用 darkroom_view。darkroom_view 必须同时满足 active、completeness>=1、锁门时间已过；没完整返回 not_ready，没解锁返回 unlock_at；可按 room_id 读取该房间全部 revisions 正文。
 - darkroom_enter 只返回门口事件和状态，不回显 note 正文。
 
 自省：
