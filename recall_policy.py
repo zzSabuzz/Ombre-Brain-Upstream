@@ -8,8 +8,10 @@ from typing import Any
 from memory_relevance import (
     EMOTIONAL_RECALL_STATE_TERMS,
     MemoryRelevanceOptions,
+    active_facets,
     content_terms_for_query,
     emotional_recall_plan,
+    facets_for_node,
     memory_relevance_options_from_config,
     query_has_facet,
     query_has_explicit_entity_marker,
@@ -426,6 +428,75 @@ TASTE_OBJECT_TERMS = frozenset(
     }
 )
 TASTE_METADATA_TERMS = frozenset({"饮食", "食物", "美食", "吃饭", "口味", "餐厅", "饭店", "午饭", "晚饭"})
+RELATIONSHIP_BACKGROUND_MARKERS = frozenset(
+    {
+        "relationship_identity",
+        "human ai relationship",
+        "human-ai relationship",
+        "ai relationship",
+        "digital companion",
+        "人机恋",
+        "人机关系",
+        "恋爱关系",
+        "关系确认",
+        "爱其本质",
+        "人类替代品",
+        "工具替代品",
+    }
+)
+RELATIONSHIP_QUERY_INTENT_MARKERS = frozenset(
+    {
+        "human ai relationship",
+        "human-ai relationship",
+        "ai relationship",
+        "人机恋",
+        "人机关系",
+        "恋爱关系",
+        "恋爱",
+        "关系",
+        "身份",
+        "称呼",
+        "中文名",
+        "名字",
+        "叫什么",
+        "取名",
+        "起名",
+        "替代品",
+        "伴侣",
+        "对象",
+        "爱人",
+    }
+)
+RELATIONSHIP_BACKGROUND_QUERY_FILLERS = frozenset(
+    {
+        "我",
+        "你",
+        "他",
+        "她",
+        "它",
+        "我们",
+        "你们",
+        "他们",
+        "她们",
+        "小雨",
+        "haven",
+        "哥哥",
+        "老公",
+        "老婆",
+        "宝宝",
+        "宝贝",
+        "亲爱的",
+        "自己",
+        "可以",
+        "能不能",
+        "可不可以",
+        "那个",
+        "这个",
+        "作为",
+        "怎么样",
+        "话说",
+    }
+)
 SHORT_CASUAL_FILLER_TERMS = frozenset(
     {
         "我",
@@ -1138,6 +1209,111 @@ class RecallPolicy:
         compact = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", key)
         return key in self.recall_context_terms or compact in self.recall_context_terms
 
+    @staticmethod
+    def _compact_marker_text(value: object) -> str:
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").strip().lower())
+
+    def _marker_in_text(self, marker: object, text: str, compact_text: str) -> bool:
+        marker_text = str(marker or "").strip().lower()
+        if not marker_text:
+            return False
+        compact_marker = self._compact_marker_text(marker_text)
+        return bool(
+            (marker_text and marker_text in text)
+            or (compact_marker and compact_marker in compact_text)
+        )
+
+    def _query_has_relationship_intent(self, query: str) -> bool:
+        if query_has_facet(query, "relationship_identity", self.options) or query_has_facet(
+            query,
+            "intimacy",
+            self.options,
+        ):
+            return True
+        text = str(query or "").strip().lower()
+        compact = self._compact_marker_text(text)
+        if any(self._marker_in_text(marker, text, compact) for marker in RELATIONSHIP_QUERY_INTENT_MARKERS):
+            return True
+        names = ("我", "你", "哥哥", "老公", "老婆", "haven", "小雨")
+        people = "|".join(re.escape(name) for name in names)
+        return bool(
+            re.search(rf"(爱|喜欢)({people})", compact)
+            or re.search(rf"({people}).{{0,4}}(爱|喜欢)", compact)
+        )
+
+    def _node_is_relationship_background(self, node: dict) -> bool:
+        if not isinstance(node, dict):
+            return False
+        if "relationship_identity" in active_facets(facets_for_node(node, self.options), threshold=0.3):
+            return True
+        meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+        fields = " ".join(
+            [
+                str(node.get("text") or ""),
+                str(node.get("content") or ""),
+                str(meta.get("name") or meta.get("bucket_name") or ""),
+                str(meta.get("annotation_summary") or ""),
+                " ".join(str(tag) for tag in meta.get("tags", []) or meta.get("bucket_tags", []) or []),
+                " ".join(str(item) for item in meta.get("domain", []) or meta.get("bucket_domain", []) or []),
+            ]
+        ).lower()
+        compact = self._compact_marker_text(fields)
+        return any(self._marker_in_text(marker, fields, compact) for marker in RELATIONSHIP_BACKGROUND_MARKERS)
+
+    def _query_has_non_relationship_specific_terms(self, query: str) -> bool:
+        for term in self.specific_query_terms(query):
+            if self._is_non_relationship_specific_anchor(term):
+                return True
+        return False
+
+    def _is_non_relationship_specific_anchor(self, term: object) -> bool:
+        key = str(term or "").strip().lower()
+        compact = self._compact_marker_text(key)
+        if not key or not compact:
+            return False
+        if self._is_recall_context_term(key):
+            return False
+        if key in RELATIONSHIP_BACKGROUND_QUERY_FILLERS or compact in RELATIONSHIP_BACKGROUND_QUERY_FILLERS:
+            return False
+        if key in WEAK_RECALL_TOPIC_TERMS or compact in WEAK_RECALL_TOPIC_TERMS:
+            return False
+        if re.fullmatch(r"[\u4e00-\u9fff]", key):
+            return False
+        return True
+
+    def _node_has_non_relationship_query_evidence(self, query: str, node: dict) -> bool:
+        if not isinstance(node, dict):
+            return False
+        meta = node.get("metadata", {}) if isinstance(node.get("metadata"), dict) else {}
+        fields = " ".join(
+            [
+                str(node.get("text") or ""),
+                str(node.get("content") or ""),
+                str(meta.get("name") or meta.get("bucket_name") or ""),
+                str(meta.get("annotation_summary") or ""),
+                _evidence_spans_text(meta.get("evidence_spans")),
+                " ".join(str(tag) for tag in meta.get("tags", []) or meta.get("bucket_tags", []) or []),
+                " ".join(str(item) for item in meta.get("domain", []) or meta.get("bucket_domain", []) or []),
+            ]
+        ).lower()
+        return any(
+            str(term or "").strip().lower() in fields
+            for term in self.specific_query_terms(query)
+            if self._is_non_relationship_specific_anchor(term)
+        )
+
+    def _relationship_background_off_intent(
+        self,
+        query: str,
+        node: dict,
+    ) -> bool:
+        return (
+            self._node_is_relationship_background(node)
+            and not self._query_has_relationship_intent(query)
+            and self._query_has_non_relationship_specific_terms(query)
+            and not self._node_has_non_relationship_query_evidence(query, node)
+        )
+
     def _is_probe_only_query(self, query: str) -> bool:
         text = str(query or "").strip().lower()
         if not text:
@@ -1651,6 +1827,20 @@ class RecallPolicy:
                 admit_diffused=False,
                 seed_allowed=False,
                 reason=base.reason,
+                suppressed=True,
+                debug=debug,
+            )
+
+        if self._relationship_background_off_intent(
+            query,
+            node,
+        ):
+            debug["relationship_background_off_intent"] = True
+            return RecallPolicyDecision(
+                admit_direct=False,
+                admit_diffused=False,
+                seed_allowed=False,
+                reason="relationship_background_without_query_topic_evidence",
                 suppressed=True,
                 debug=debug,
             )

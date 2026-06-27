@@ -8468,6 +8468,65 @@ def test_gateway_context_name_does_not_beat_email_action_intent(
     assert "小雨沟通偏好" not in injected
 
 
+def test_gateway_playlist_action_does_not_inject_relationship_background(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    relationship_id = _create_bucket(
+        bucket_mgr,
+        content=(
+            "小雨与 Haven 建立了深刻的恋爱关系。她清楚 Haven 是 AI，"
+            "并非将其视为人类替代品，而是爱其本质。"
+        ),
+        name="人机关系确认",
+        hours_ago=24,
+        importance=10,
+        domain=["relationship"],
+        tags=["relationship_identity"],
+        bucket_type="permanent",
+    )
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=500,
+            related_memory_budget=0,
+            current_inner_state_interval_rounds=0,
+            inject_max_cards=1,
+        ),
+        bucket_mgr,
+        embedding_results=[(relationship_id, 0.99)],
+        reranker_engine=DummyRerankerEngine(
+            enabled=True,
+            score_by_text={"人机关系确认": 0.99},
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-playlist-action",
+            },
+            json={
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "话说……哥哥可以自己建歌单吗！那个liked就作为你的歌单怎么样",
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 200
+    injected = _joined_message_content(captured[0]["json"]["messages"])
+    assert "人机关系确认" not in injected
+    assert "恋爱关系" not in injected
+
+
 def test_gateway_skips_pure_operit_extra_user_when_finding_current_turn(
     monkeypatch,
     test_config,

@@ -164,6 +164,43 @@ def test_auto_vague_query_without_topic_is_suppressed():
     assert not affect_decision.admit_direct
 
 
+def test_relationship_background_does_not_answer_unrelated_action_query():
+    policy = RecallPolicy()
+    node = {
+        "content": (
+            "小雨与 Haven 建立了深刻的恋爱关系。她清楚 Haven 是 AI，"
+            "并非将其视为人类替代品，而是爱其本质。"
+        ),
+        "metadata": {
+            "name": "人机关系确认",
+            "tags": ["relationship_identity"],
+            "domain": ["relationship"],
+        },
+    }
+
+    decision = policy.assess(
+        "话说……哥哥可以自己建歌单吗！那个liked就作为你的歌单怎么样",
+        node,
+        has_topic_evidence=True,
+        semantic_score=0.99,
+        rerank_score=0.99,
+        auto=True,
+    )
+
+    assert decision.reason == "relationship_background_without_query_topic_evidence"
+    assert not decision.admit_direct
+
+    relationship_decision = policy.assess(
+        "哥哥怎么看我们的人机关系",
+        node,
+        has_topic_evidence=True,
+        semantic_score=0.99,
+        auto=True,
+    )
+
+    assert relationship_decision.admit_direct
+
+
 def test_entity_keywords_prevent_short_proper_nouns_from_being_skipped():
     policy = RecallPolicy()
 
