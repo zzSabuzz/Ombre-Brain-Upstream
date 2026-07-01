@@ -5054,7 +5054,7 @@ def test_gateway_hook_recall_normalizes_pronouns_with_configured_identity(
         monkeypatch,
         cfg,
         bucket_mgr,
-        embedding_results={"Lapis 的笔友都有谁？": [(bucket_id, 0.96)]},
+        embedding_results={"笔友": [(bucket_id, 0.96)]},
         embedding_queries=embedding_queries,
     )
 
@@ -5073,12 +5073,13 @@ def test_gateway_hook_recall_normalizes_pronouns_with_configured_identity(
     payload = response.json()
     assert captured == []
     assert payload["query"] == "你的笔友都有谁？"
-    assert payload["recall_query"] == "Lapis 的笔友都有谁？"
-    assert any(query == "Lapis 的笔友都有谁？" for query in embedding_queries)
+    assert payload["recall_query"] == "笔友"
+    assert any(query == "笔友" for query in embedding_queries)
     assert len(payload["cards"]) == 1
     assert payload["cards"][0]["bucket_id"] == bucket_id
     assert "Lapis 的笔友名册" in payload["additional_context"]
-    assert service._hook_recall_query_for_memory("我的蓝色偏好是什么？") == "小雨 的蓝色偏好是什么？"
+    assert service._hook_recall_query_for_memory("我的蓝色偏好是什么？") == "蓝色偏好"
+    assert service._hook_recall_query_for_memory("你的名字是什么？") == "Lapis 的名字"
 
 
 def test_gateway_direct_event_date_tag_suppresses_created_tag(

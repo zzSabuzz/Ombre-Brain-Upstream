@@ -2147,6 +2147,29 @@ class GatewayService:
         if not compact:
             return text
 
+        if ai_name:
+            topic_query = self._hook_recall_possessive_topic_query(
+                text,
+                owners=("你自己的", "你的"),
+                owner_name=ai_name,
+            )
+            if topic_query:
+                return topic_query
+            topic_query = self._hook_recall_you_have_topic_query(text)
+            if topic_query:
+                return topic_query
+        if user_name:
+            topic_query = self._hook_recall_possessive_topic_query(
+                text,
+                owners=("我自己的", "我的"),
+                owner_name=user_name,
+            )
+            if topic_query:
+                return topic_query
+            topic_query = self._hook_recall_i_have_topic_query(text)
+            if topic_query:
+                return topic_query
+
         rewritten = text
         if ai_name and not (ai_key and ai_key in compact):
             replacements = (
@@ -2186,6 +2209,47 @@ class GatewayService:
                 rewritten = rewritten.replace(old, new)
 
         return rewritten
+
+    @classmethod
+    def _hook_recall_possessive_topic_query(
+        cls,
+        text: str,
+        *,
+        owners: tuple[str, ...],
+        owner_name: str,
+    ) -> str:
+        suffix = r"(?:分别是谁|都有谁|有谁|有哪些|是哪些|是什么|是谁|叫什么|吗|呢|呀|啊|吧)?[？?。.!！]*$"
+        for owner in owners:
+            match = re.match(rf"^{re.escape(owner)}(?P<topic>.+?){suffix}", text)
+            if not match:
+                continue
+            topic = match.group("topic").strip(" ，,。？?！!：:")
+            return cls._hook_recall_owner_topic_query(topic, owner_name)
+        return ""
+
+    @classmethod
+    def _hook_recall_you_have_topic_query(cls, text: str) -> str:
+        match = re.match(r"^你有(?:哪些|什么|几个|几位|几条|多少)?(?P<topic>.+?)(?:吗|呢|呀|啊|吧)?[？?。.!！]*$", text)
+        if not match:
+            return ""
+        return match.group("topic").strip(" ，,。？?！!：:")
+
+    @classmethod
+    def _hook_recall_i_have_topic_query(cls, text: str) -> str:
+        match = re.match(r"^我有(?:哪些|什么|几个|几位|几条|多少)?(?P<topic>.+?)(?:吗|呢|呀|啊|吧)?[？?。.!！]*$", text)
+        if not match:
+            return ""
+        return match.group("topic").strip(" ，,。？?！!：:")
+
+    @classmethod
+    def _hook_recall_owner_topic_query(cls, topic: str, owner_name: str) -> str:
+        cleaned = str(topic or "").strip()
+        if not cleaned:
+            return ""
+        compact = cls._compact_lookup_key(cleaned)
+        if len(compact) < 2 or any(marker in compact for marker in ("名字", "中文名", "英文名", "命名")):
+            return f"{owner_name} 的{cleaned}"
+        return cleaned
 
     @staticmethod
     def _hook_recall_messages_with_query(
