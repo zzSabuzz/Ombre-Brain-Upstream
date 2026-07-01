@@ -7826,7 +7826,7 @@ async def hold(
     date: str = "",
     domain: str = "",
 ) -> str:
-    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；显式 domain 会覆盖自动领域；显式 valence/arousal 会覆盖自动情绪。title 可选，传了就用你给的标题，不传则自动生成。普通记忆 content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor。### affect_anchor 只允许一行和弦/bpm/力度温度线，不写普通文字、场景、含义、事实或反思；这些内容分别放 moment/original/reflection。feel=True/whisper=True 时 content 只写第一人称感受，不写分段标题、moment 或和弦。"""
+    """写一条长期记忆。单个事实/承诺/偏好用 hold；旧记忆的新感受用 comment_bucket；悄悄话用 whisper=True。date 可传事件日期；显式 domain 会覆盖自动领域；显式 valence/arousal 会覆盖自动情绪。title 可选，传了就用你给的标题，不传则自动生成。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection、### todo、### affect_anchor。### todo 只放明确可完成、可标 done、可写回的待办；“以后聊到 X 要想到 Y”这类回应提示放 ### reflection，不写 todo。### affect_anchor 只允许一行和弦/bpm/力度温度线，不写普通文字、场景、含义、事实或反思；这些内容分别放正文/moment/original/reflection。feel=True/whisper=True 时 content 只写第一人称感受，不写分段标题、moment 或和弦。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -8122,7 +8122,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
 
 @mcp.tool()
 async def grow(content: str, auto: bool = False, source: str = "", title: str = "", context: Context | None = None) -> str:
-    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。保留原文称呼、昵称、互称、自称和原话，不要把临时称呼推成稳定画像事实。title 可选，短内容时传了就用你给的标题。普通记忆 content 按需分段：正文 + ### moment + ### original + ### reflection + ### followup + ### affect_anchor。### affect_anchor 只允许一行和弦/bpm/力度温度线，不写普通文字、场景、含义、事实或反思；这些内容分别放 moment/original/reflection。feel 年轮只写第一人称感受，不写分段标题、moment 或和弦。"""
+    """把筛过的长片段拆成少量长期记忆；单条事实/承诺/偏好优先 hold，旧记忆补感受优先 comment_bucket。只有多个已筛选长期记忆点才用 grow，别塞整段流水账。保留原文称呼、昵称、互称、自称和原话，不要把临时称呼推成稳定画像事实。title 可选，短内容时传了就用你给的标题。普通记忆 content 的最小写入就是正文；只有确实需要结构化时才按需使用 ### moment、### original、### reflection、### todo、### affect_anchor。### todo 只放明确可完成、可标 done、可写回的待办；“以后聊到 X 要想到 Y”这类回应提示放 ### reflection，不写 todo。### affect_anchor 只允许一行和弦/bpm/力度温度线，不写普通文字、场景、含义、事实或反思；这些内容分别放正文/moment/original/reflection。feel 年轮只写第一人称感受，不写分段标题、moment 或和弦。"""
     await decay_engine.ensure_started()
 
     if not content or not content.strip():
