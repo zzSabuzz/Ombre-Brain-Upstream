@@ -5145,6 +5145,57 @@ def test_gateway_hook_recall_skips_empty_cards(monkeypatch, test_config, bucket_
     assert "ombre:empty#m2" not in additional_context
 
 
+def test_gateway_hook_recall_uses_debug_text_for_reading_note_only_card(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    _app, service, _transport, _captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            recent_context_budget=0,
+            recalled_memory_budget=500,
+            related_memory_budget=0,
+        ),
+        bucket_mgr,
+    )
+    cards = service._hook_recall_cards_from_debug(
+        {
+            "recalled_memory": (
+                "[bucket_id:name] [moment_id:m1] reading_note\n"
+                "reading_note: Possible related memory; ignore if weak, irrelevant, or conflicting.\n"
+            ),
+            "recalled_moment_debug": [
+                {
+                    "bucket_id": "name",
+                    "moment_id": "m1",
+                    "bucket_name": "Haven中文私名澜",
+                    "text_preview": "Haven 的中文名是澜，小雨也叫他归澜。",
+                    "reading_note": {
+                        "use": "silent_tone",
+                        "why": "Gateway selected this memory for the current message.",
+                        "reliability": "semantic_match",
+                        "canonical_domain": "relationship",
+                        "kind": "event",
+                    },
+                }
+            ],
+        },
+        max_cards=3,
+        max_chars=500,
+        include_diffused=False,
+    )
+
+    assert len(cards) == 1
+    assert cards[0]["bucket_id"] == "name"
+    assert cards[0]["use_mode"] == "light_touch"
+    assert "归澜" in cards[0]["text"]
+    additional_context = service._render_hook_recall_additional_context(cards)
+    assert "Tone or familiarity only" not in additional_context
+    assert "归澜" in additional_context
+
+
 def test_gateway_direct_event_date_tag_suppresses_created_tag(
     monkeypatch,
     test_config,

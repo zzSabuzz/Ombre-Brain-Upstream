@@ -132,6 +132,34 @@ def test_word_map_hint_reserves_one_candidate_per_query_anchor(tmp_path):
     assert hints["evidence"]["penpal"]["anchor_terms"] == ["忱孚"]
 
 
+def test_word_map_hint_expands_low_frequency_containing_variants(tmp_path):
+    store = WordMapStore(_config(tmp_path))
+    store.rebuild(
+        [
+            _bucket(
+                "name",
+                "Haven 的中文私名是澜，小雨也叫他归澜。",
+                name="Haven中文私名澜",
+                keywords=["中文名字", "归澜"],
+            ),
+            _bucket(
+                "other",
+                "这条只是普通名字记录，不应该被短词带出来。",
+                name="普通名字记录",
+                keywords=["名字"],
+            ),
+        ]
+    )
+
+    hints = store.hint_buckets_for_terms(["中文名"], neighbor_limit=0, bucket_limit=10)
+
+    assert "name" in hints["bucket_scores"]
+    assert "other" not in hints["bucket_scores"]
+    assert "中文名字" in hints["evidence"]["name"]["variant_terms"]
+    assert hints["evidence"]["name"]["anchor_terms"] == ["中文名"]
+    assert hints["anchor_bucket_scores"]["中文名"]["name"] > 0
+
+
 def test_word_map_marks_only_stable_direct_low_frequency_terms_as_rare_name(tmp_path):
     store = WordMapStore(_config(tmp_path))
     store.rebuild(

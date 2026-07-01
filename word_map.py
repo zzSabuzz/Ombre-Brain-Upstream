@@ -574,6 +574,7 @@ class WordMapStore:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
+            variant_scores = self._hint_variant_terms(conn, cleaned_terms)
             neighbor_terms = [term for term in cleaned_terms if term not in self.weak_hint_terms]
             neighbor_scores = self._hint_neighbor_terms(conn, neighbor_terms, neighbor_limit)
             term_sources = {
@@ -584,6 +585,8 @@ class WordMapStore:
                 }
                 for term in cleaned_terms
             }
+            for term, info in variant_scores.items():
+                term_sources[term] = info
             for term, info in neighbor_scores.items():
                 term_sources[term] = info
 
@@ -633,6 +636,7 @@ class WordMapStore:
                 {
                     "terms": [],
                     "direct_terms": [],
+                    "variant_terms": [],
                     "neighbor_terms": [],
                     "anchor_terms": [],
                     "rare_name_terms": [],
@@ -666,7 +670,13 @@ class WordMapStore:
                 if card_source and card_source not in bucket_evidence["rare_name_sources"]:
                     bucket_evidence["rare_name_sources"].append(card_source)
             bucket_evidence["terms"].append(row_payload)
-            target_key = "direct_terms" if source_info.get("kind") == "direct" else "neighbor_terms"
+            source_kind = str(source_info.get("kind") or "")
+            if source_kind == "direct":
+                target_key = "direct_terms"
+            elif source_kind == "variant":
+                target_key = "variant_terms"
+            else:
+                target_key = "neighbor_terms"
             if term not in bucket_evidence[target_key]:
                 bucket_evidence[target_key].append(term)
             for source_term in source_terms:
@@ -710,10 +720,82 @@ class WordMapStore:
                 }
                 for term, info in neighbor_scores.items()
             ],
+            "variants": [
+                {
+                    "term": term,
+                    "score": round(float(info.get("weight", 0.0)), 4),
+                    "source_terms": list(info.get("sources") or []),
+                }
+                for term, info in variant_scores.items()
+            ],
             "bucket_scores": {bucket_id: round(scores[bucket_id], 4) for bucket_id in returned_ids},
             "anchor_bucket_scores": anchor_bucket_scores,
             "evidence": {bucket_id: evidence[bucket_id] for bucket_id in returned_ids},
         }
+
+    def _hint_variant_terms(
+        self,
+        conn: sqlite3.Connection,
+        source_terms: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        variants: dict[str, dict[str, Any]] = {}
+        for source_term in source_terms:
+            source_key = _compact_term(source_term)
+            if (
+                not source_key
+                or len(source_key) < 3
+                or source_term in self.weak_hint_terms
+            ):
+                continue
+            rows = conn.execute(
+                """
+                SELECT term, kind, bucket_count, weight
+                FROM word_nodes
+                WHERE bucket_count <= ?
+                ORDER BY bucket_count ASC, LENGTH(term) ASC, weight DESC, term ASC
+                LIMIT 500
+                """,
+                (self.rare_name_max_bucket_count,),
+            ).fetchall()
+            for row in rows:
+                term = self._clean_term(row["term"])
+                term_key = _compact_term(term)
+                if (
+                    not term
+                    or term == source_term
+                    or not term_key
+                    or len(term_key) <= len(source_key)
+                    or source_key not in term_key
+                    or len(term_key) - len(source_key) > 8
+                    or term in self.weak_hint_terms
+                    or term in self.overview_stopwords
+                ):
+                    continue
+                try:
+                    bucket_count = max(1, int(row["bucket_count"] or 1))
+                    node_weight = float(row["weight"] or 0.0)
+                except (TypeError, ValueError):
+                    bucket_count = 1
+                    node_weight = 0.0
+                proximity = len(source_key) / max(len(term_key), 1)
+                weight = min(0.82, max(0.35, proximity * 0.82))
+                if bucket_count > 1:
+                    weight *= 1.0 / bucket_count
+                if node_weight <= 0:
+                    weight *= 0.7
+                info = variants.setdefault(
+                    term,
+                    {"kind": "variant", "weight": 0.0, "sources": []},
+                )
+                info["weight"] = max(float(info.get("weight", 0.0)), weight)
+                if source_term not in info["sources"]:
+                    info["sources"].append(source_term)
+        return dict(
+            sorted(
+                variants.items(),
+                key=lambda item: (-float(item[1].get("weight", 0.0)), item[0]),
+            )[:12]
+        )
 
     def _hint_neighbor_terms(
         self,

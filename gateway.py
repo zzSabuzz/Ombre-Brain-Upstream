@@ -8710,7 +8710,7 @@ class GatewayService:
         if use == "explicit_recall":
             return "may_mention"
         if use == "silent_tone":
-            return "do_not_mention"
+            return "do_not_mention_unless_user_asks"
         if use == "ignore":
             return "do_not_use"
         return "do_not_mention_unless_user_asks"
@@ -8794,7 +8794,8 @@ class GatewayService:
             )
         elif use == "silent_tone":
             text = (
-                "Tone background only; ignore if it does not fit. Do not mention it."
+                "Possible related memory; ignore if weak, irrelevant, or conflicting. "
+                "Do not mechanically repeat or mention retrieval."
             )
         elif use == "ignore":
             text = "Ignore this memory for the current reply."
@@ -14221,6 +14222,7 @@ class GatewayService:
                 self._format_moment_debug(
                     moment,
                     explicit_lookup=explicit_lookup,
+                    include_text=True,
                     query=query,
                     direct_render=self._direct_bucket_render_debug(
                         bucket_map.get(str(moment.get("bucket_id") or "")),
@@ -14336,7 +14338,7 @@ class GatewayService:
         if use == "explicit_recall":
             return "explicit"
         if use == "silent_tone":
-            return "silent"
+            return "light_touch"
         if use == "ignore":
             return "ignore"
         return "light_touch"
@@ -14357,7 +14359,7 @@ class GatewayService:
         if use_mode == "explicit":
             return "Use directly only if it helps answer this message; current user message wins."
         if use_mode == "silent":
-            return "Tone or familiarity only; do not mention the memory."
+            return "Possible related memory; ignore if irrelevant or conflicting; current user message wins."
         if use_mode == "ignore":
             return "Do not use for this reply."
         return "Use as background; do not mention retrieval or force it into the reply."
@@ -14468,6 +14470,8 @@ class GatewayService:
             first_summary = self._hook_recall_first_line_summary(first_line, render_shape)
             if first_summary:
                 text = first_summary if not text else f"{first_summary}\n{text}"
+        if not text:
+            text = str(row.get("text_preview") or row.get("content_preview") or row.get("note") or "").strip()
         return self._hook_recall_card(
             source=source,
             bucket_id=bucket_id,
