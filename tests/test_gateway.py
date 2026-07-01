@@ -5196,6 +5196,29 @@ def test_gateway_hook_recall_uses_debug_text_for_reading_note_only_card(
     assert "归澜" in additional_context
 
 
+def test_gateway_word_map_debug_reports_variant_terms(monkeypatch, test_config, bucket_mgr):
+    _app, service, _transport, _captured = _build_service(
+        monkeypatch,
+        _gateway_config(test_config),
+        bucket_mgr,
+    )
+
+    payload = service._word_map_hint_debug_from_items(
+        [
+            {
+                "word_map_hint": True,
+                "bucket": {"id": "name"},
+                "word_map_terms": [],
+                "word_map_variant_terms": ["中文名字"],
+                "word_map_neighbor_terms": [],
+            }
+        ]
+    )
+
+    assert payload["bucket_ids"] == ["name"]
+    assert payload["variant_terms"] == ["中文名字"]
+
+
 def test_gateway_direct_event_date_tag_suppresses_created_tag(
     monkeypatch,
     test_config,

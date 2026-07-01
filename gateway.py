@@ -8306,6 +8306,7 @@ class GatewayService:
                 item["word_map_hint"] = True
                 item["word_map_score"] = self._clamp(word_map_boost_scores.get(bucket_id, 0.0))
                 item["word_map_terms"] = list(hint_debug.get("direct_terms") or [])
+                item["word_map_variant_terms"] = list(hint_debug.get("variant_terms") or [])
                 item["word_map_neighbor_terms"] = list(hint_debug.get("neighbor_terms") or [])
                 item["rare_name_match"] = bool(hint_debug.get("rare_name_terms"))
                 item["rare_name_terms"] = list(hint_debug.get("rare_name_terms") or [])
@@ -11324,6 +11325,7 @@ class GatewayService:
                 "enabled": self._word_map_hint_available(),
                 "bucket_ids": [],
                 "terms": [],
+                "variant_terms": [],
                 "neighbor_terms": [],
                 "rare_name_bucket_ids": [],
                 "rare_name_terms": [],
@@ -12293,6 +12295,7 @@ class GatewayService:
                     "word_map_score": word_map_score,
                     "word_map_hint": bucket_id in word_map_scores,
                     "word_map_terms": list(word_map_item_debug.get("direct_terms") or []),
+                    "word_map_variant_terms": list(word_map_item_debug.get("variant_terms") or []),
                     "word_map_neighbor_terms": list(
                         word_map_item_debug.get("neighbor_terms") or []
                     ),
@@ -13374,6 +13377,7 @@ class GatewayService:
             "enabled": self._word_map_hint_available(),
             "bucket_ids": [],
             "terms": [],
+            "variant_terms": [],
             "neighbor_terms": [],
             "rare_name_bucket_ids": [],
             "rare_name_terms": [],
@@ -13388,6 +13392,9 @@ class GatewayService:
             for term in item.get("word_map_terms") or []:
                 if term not in payload["terms"]:
                     payload["terms"].append(term)
+            for term in item.get("word_map_variant_terms") or []:
+                if term not in payload["variant_terms"]:
+                    payload["variant_terms"].append(term)
             for term in item.get("word_map_neighbor_terms") or []:
                 if term not in payload["neighbor_terms"]:
                     payload["neighbor_terms"].append(term)
@@ -13407,6 +13414,7 @@ class GatewayService:
                 "enabled": self._word_map_hint_available(),
                 "bucket_ids": [],
                 "terms": [],
+                "variant_terms": [],
                 "neighbor_terms": [],
                 "rare_name_bucket_ids": [],
                 "rare_name_terms": [],
@@ -13414,7 +13422,14 @@ class GatewayService:
         )
         incoming = self._word_map_hint_debug_from_items(items)
         current["enabled"] = bool(current.get("enabled") or incoming.get("enabled"))
-        for key in ("bucket_ids", "terms", "neighbor_terms", "rare_name_bucket_ids", "rare_name_terms"):
+        for key in (
+            "bucket_ids",
+            "terms",
+            "variant_terms",
+            "neighbor_terms",
+            "rare_name_bucket_ids",
+            "rare_name_terms",
+        ):
             values = current.setdefault(key, [])
             for value in incoming.get(key) or []:
                 if value not in values:
@@ -14008,6 +14023,7 @@ class GatewayService:
             "word_map_score": self._safe_float(item.get("word_map_score"), 0.0),
             "word_map_hint": bool(item.get("word_map_hint")),
             "word_map_terms": list(item.get("word_map_terms") or []),
+            "word_map_variant_terms": list(item.get("word_map_variant_terms") or []),
             "word_map_neighbor_terms": list(item.get("word_map_neighbor_terms") or []),
             "rare_name_match": bool(item.get("rare_name_match")),
             "rare_name_terms": list(item.get("rare_name_terms") or []),
@@ -14067,6 +14083,7 @@ class GatewayService:
             "word_map_score": self._safe_float(moment.get("word_map_score"), 0.0),
             "word_map_hint": bool(moment.get("word_map_hint")),
             "word_map_terms": list(moment.get("word_map_terms") or []),
+            "word_map_variant_terms": list(moment.get("word_map_variant_terms") or []),
             "word_map_neighbor_terms": list(moment.get("word_map_neighbor_terms") or []),
             "rare_name_match": bool(moment.get("rare_name_match")),
             "rare_name_terms": list(moment.get("rare_name_terms") or []),
