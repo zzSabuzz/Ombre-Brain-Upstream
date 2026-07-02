@@ -85,6 +85,7 @@ from memory_diffusion import (
     should_suppress_context_candidate,
 )
 from memory_edges import MemoryEdgeStore
+from entity_edges import EntityEdgeStore, extract_entity_edges_from_bucket
 from memory_moments import MemoryMomentStore, parse_bucket_moments
 from memory_relevance import (
     active_facets,
@@ -166,6 +167,7 @@ recall_diagnostics = RecallDiagnosticsLogger(config)  # Recall diagnostics / 召
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 persona_engine = PersonaStateEngine(config)           # Persona state engine / 人格状态引擎
 memory_edge_store = MemoryEdgeStore(config)            # Explicit memory relationship edges / 显式记忆关系边
+entity_edge_store = EntityEdgeStore(config)            # Person/object hint edges / 人物对象轻边
 memory_node_store = MemoryNodeStore(config)            # Computable memory node index / 可计算记忆节点
 memory_moment_store = MemoryMomentStore(config)        # Structured bucket body/comment moment index / 记忆片段索引
 memory_write_gate = MemoryWriteGate(config)            # Automatic grow gate / 自动写入门卫
@@ -3053,9 +3055,32 @@ async def _enrich_memory_async(bucket_id: str, *, force: bool = False) -> None:
             embedding_engine=embedding_engine,
             force=force,
         )
+        entity_edges = await _refresh_entity_edges_for_bucket_id(bucket_id)
         logger.debug("Memory enrichment complete / 记忆关系补全完成: %s", result)
+        if entity_edges:
+            logger.debug("Entity edge refresh complete / 人物边刷新完成: %s edges for %s", entity_edges, bucket_id)
     except Exception as e:
         logger.warning("Memory enrichment failed / 记忆关系补全失败: %s: %s", bucket_id, e)
+
+
+async def _refresh_entity_edges_for_bucket_id(bucket_id: str) -> int:
+    bucket_id = str(bucket_id or "").strip()
+    if not bucket_id:
+        return 0
+    bucket = await bucket_mgr.get(bucket_id)
+    return _refresh_entity_edges_for_bucket(bucket)
+
+
+def _refresh_entity_edges_for_bucket(bucket: dict | None) -> int:
+    if not bucket or is_self_anchor_bucket(bucket):
+        return 0
+    meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if meta.get("type") == "feel" or meta.get("protected"):
+        return 0
+    bucket_id = str(bucket.get("id") or "")
+    edges = extract_entity_edges_from_bucket(bucket, _identity())
+    saved = entity_edge_store.replace_bucket_edges(bucket_id, edges)
+    return len(saved)
 
 
 def _queue_embedding_refresh(bucket_id: str) -> bool:
@@ -3169,6 +3194,7 @@ async def health_check(request):
             "buckets": stats["permanent_count"] + stats["dynamic_count"],
             "decay_engine": "running" if decay_engine.is_running else "stopped",
             "memory_edges": len(memory_edge_store.list_edges()),
+            "entity_edges": len(entity_edge_store.list_edges()),
             "reflection": {
                 "enabled": reflection_engine.enabled,
                 "auto_enabled": reflection_engine.auto_enabled,
@@ -3531,6 +3557,12 @@ def _delete_bucket_indexes(bucket_id: str) -> tuple[dict, list[str]]:
         errors.append("edges")
 
     try:
+        cleanup["entity_edges"] = entity_edge_store.delete_for_bucket(bucket_id)
+    except Exception as e:
+        logger.warning("Failed to delete entity edges for bucket / 删除桶人物边失败: %s: %s", bucket_id, e)
+        errors.append("entity_edges")
+
+    try:
         cleanup["node"] = memory_node_store.delete(bucket_id)
     except Exception as e:
         logger.warning("Failed to delete memory node for bucket / 删除桶 node 索引失败: %s: %s", bucket_id, e)
@@ -3690,6 +3722,8 @@ async def _backfill_memory_enrichment(
                 embedding_engine=emb_engine,
                 force=True,
             )
+            if edge_store is memory_edge_store:
+                await _refresh_entity_edges_for_bucket_id(bucket_id)
             processed.append(bucket_id)
         except Exception as e:
             logger.warning("Memory enrichment backfill failed / enrich 补跑失败: %s: %s", bucket_id, e)
@@ -8415,6 +8449,7 @@ async def profile_fact(
         created_bucket = await bucket_mgr.get(bucket_id)
         if created_bucket:
             memory_moment_store.upsert_bucket(created_bucket)
+            _refresh_entity_edges_for_bucket(created_bucket)
     except Exception as e:
         logger.warning("Profile fact moment indexing failed: %s", e)
 

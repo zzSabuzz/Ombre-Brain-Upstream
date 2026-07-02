@@ -10685,6 +10685,64 @@ def test_relation_query_prefers_focused_explicit_edge_pair(
     ]
 
 
+def test_entity_edge_boost_prefers_configured_user_preference(
+    monkeypatch, test_config, bucket_mgr
+):
+    cfg = _gateway_config(
+        test_config,
+        core_memory_budget=0,
+        recent_context_budget=0,
+        related_memory_budget=0,
+        word_map_hint_enabled=False,
+        query_planner_enabled=False,
+        first_card_min_score=0.1,
+        second_card_min_score=0.1,
+    )
+    cfg["identity"] = {
+        "ai_name": "Haven",
+        "user_name": "Xiaoyu",
+        "user_display_name": "小雨",
+        "user_aliases": ["宝宝"],
+    }
+    liked_id = _create_bucket(
+        bucket_mgr,
+        content="小雨喜欢暗色故事，偏好阴郁复杂的故事气质。",
+        name="暗色故事偏好",
+        hours_ago=6,
+        tags=["故事", "偏好"],
+        domain=["relationship"],
+    )
+    other_id = _create_bucket(
+        bucket_mgr,
+        content="普通故事记录：这是一段关于阳光校园的故事。",
+        name="普通故事记录",
+        hours_ago=6,
+        tags=["故事"],
+        domain=["general"],
+    )
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr, embedding_results=[])
+    service.entity_edge_store.add_edge("小雨", "likes", "暗色故事", liked_id, 0.9, "test preference")
+    all_buckets = _run(bucket_mgr.list_all())
+
+    selected, _suppressed = _run(
+        service._dynamic_bucket_candidate_items(
+            "我喜欢的故事",
+            "sess-entity-edge",
+            all_buckets,
+            allow_semantic=False,
+            allow_rerank=False,
+        )
+    )
+
+    selected_ids = [item["bucket"]["id"] for item in selected]
+    assert liked_id in selected_ids
+    if other_id in selected_ids:
+        assert selected_ids.index(liked_id) < selected_ids.index(other_id)
+    liked_item = next(item for item in selected if item["bucket"]["id"] == liked_id)
+    assert liked_item["entity_edge_match"] is True
+    assert liked_item["entity_edge_relation"] == "likes"
+
+
 def test_activated_axis_allows_precise_future_subterm(
     monkeypatch, test_config, bucket_mgr
 ):
