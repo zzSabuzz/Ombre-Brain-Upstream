@@ -296,6 +296,8 @@ def test_dashboard_keeps_compact_legacy_filter_row_and_compatible_filters():
     assert "kindFilters" not in build_block
     assert "statusFilters" not in build_block
     assert "flagFilters" not in build_block
+    assert "domainFilters" not in build_block
+    assert "domainOptions.map" not in build_block
     assert "key: 'profile'" not in build_block
     assert "label: '画像'" not in build_block
     assert "filters.onclick = function(e)" in build_block
@@ -306,6 +308,21 @@ def test_dashboard_keeps_compact_legacy_filter_row_and_compatible_filters():
     assert "currentFilter.startsWith('legacy_domain:')" in filter_block
     assert "&& !isDailyImpressionBucket(b)" in filter_block
     assert "&& !isSelfAnchorBucket(b)" in filter_block
+
+
+def test_dashboard_bucket_sort_toggle_uses_created_time_or_weight():
+    html = Path("dashboard.html").read_text(encoding="utf-8")
+    sort_block = html.split("function bucketCreatedTime", 1)[1].split("function bucketBulkDeleteBlockReason", 1)[0]
+    render_block = html.split("function renderBuckets", 1)[1].split("async function searchBuckets", 1)[0]
+
+    assert 'id="bucket-sort-toggle"' in html
+    assert "let bucketSortMode = 'time';" in html
+    assert "let bucketSortDescending = true;" in html
+    assert "return Number.isFinite(parsed) ? parsed : 0;" in sort_block
+    assert "bucketSortMode === 'weight' ? bucketWeightScore" in sort_block
+    assert "bucketSortMode = bucketSortMode === 'time' ? 'weight' : 'time';" in sort_block
+    assert "var sortedBuckets = sortBucketsForDisplay(buckets);" in render_block
+    assert "formatTimeAgo(b.created || b.last_active)" in render_block
 
 
 def test_dashboard_hides_confirm_button_for_active_profile_facts():

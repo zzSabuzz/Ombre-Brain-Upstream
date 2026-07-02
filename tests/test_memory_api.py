@@ -252,6 +252,44 @@ async def test_dashboard_bucket_payloads_include_read_only_metadata_view(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_dashboard_bucket_list_sorts_by_created_time(monkeypatch, bucket_mgr, decay_eng):
+    import server
+
+    old_updated_id = await bucket_mgr.create(
+        content="旧创建但刚更新",
+        name="旧创建",
+        importance=10,
+        created="2026-05-01T00:00:00+00:00",
+        updated_at="2026-05-05T00:00:00+00:00",
+        last_active="2026-05-05T00:00:00+00:00",
+    )
+    newest_id = await bucket_mgr.create(
+        content="新创建",
+        name="新创建",
+        importance=1,
+        created="2026-05-03T00:00:00+00:00",
+        updated_at="2026-05-03T00:00:00+00:00",
+        last_active="2026-05-03T00:00:00+00:00",
+    )
+    middle_id = await bucket_mgr.create(
+        content="中间创建",
+        name="中间创建",
+        importance=5,
+        created="2026-05-02T00:00:00+00:00",
+        updated_at="2026-05-02T00:00:00+00:00",
+        last_active="2026-05-02T00:00:00+00:00",
+    )
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "decay_engine", decay_eng)
+    monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
+
+    response = await server.api_buckets(DummyRequest())
+    payload = json.loads(response.body)
+
+    assert [row["id"] for row in payload[:3]] == [newest_id, middle_id, old_updated_id]
+
+
+@pytest.mark.asyncio
 async def test_breath_appends_surface_dream_block(monkeypatch, bucket_mgr, decay_eng):
     import server
 

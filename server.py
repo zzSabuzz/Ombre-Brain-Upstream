@@ -2474,12 +2474,12 @@ def _bucket_light_payload(bucket: dict) -> dict:
 
 
 def _bucket_light_sort_key(item: dict) -> str:
-    return str(item.get("updated_at") or item.get("last_active") or item.get("created") or "")
+    return str(item.get("created") or "")
 
 
 def _bucket_dashboard_sort_key(item: dict) -> tuple[str, str]:
     return (
-        str(item.get("updated_at") or item.get("last_active") or item.get("created") or ""),
+        str(item.get("created") or ""),
         str(item.get("id") or ""),
     )
 

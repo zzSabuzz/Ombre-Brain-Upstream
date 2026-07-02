@@ -282,6 +282,12 @@
     width: 160px;
   }
   .bucket-tools .bulk-hidden { display: none; }
+  .bucket-sort-toggle {
+    width: 38px;
+    min-width: 38px;
+    justify-content: center;
+    font-size: 14px;
+  }
   .bucket-bulk-status {
     font-size: 12px;
     color: var(--text-dim);
@@ -2443,6 +2449,7 @@
 <div class="content" id="list-view">
   <div class="filters" id="filters"></div>
   <div class="bucket-tools" id="bucket-bulk-toolbar">
+    <button type="button" class="bucket-sort-toggle" id="bucket-sort-toggle" onclick="toggleBucketSortMode()" title="按创建时间倒序">⏱↓</button>
     <button type="button" id="bucket-bulk-toggle" onclick="toggleBucketBulkMode()">批量选择</button>
     <button type="button" class="bulk-hidden" data-bulk-action="select-current" onclick="selectCurrentBuckets()">全选当前筛选</button>
     <button type="button" class="bulk-hidden" data-bulk-action="clear" onclick="clearBucketSelection()">清空</button>
@@ -3316,6 +3323,8 @@ let wordMapData = null;
 let identitySemanticData = null;
 let domainOptions = [];
 let currentFilter = 'all';
+let bucketSortMode = 'time';
+let bucketSortDescending = true;
 let bucketBulkMode = false;
 let selectedBucketIds = new Set();
 let dashboardCommentAuthor = 'Rain';
@@ -4935,9 +4944,6 @@ function buildFilters() {
     { key: 'archived', label: '📦 归档' },
     { key: 'tag:self_anchor', label: '自我' },
   ];
-  const domainFilters = (domainOptions || []).map(function(item) {
-    return { key: 'canonical_domain:' + item.key, label: item.label || item.key };
-  });
   const visibleFilters = legacyViewFilters.map(function(item) { return item.key; });
   const compatiblePrefixes = ['canonical_domain:', 'kind:', 'status_view:', 'flag:', 'legacy_domain:', 'tag:', 'domain:'];
   const isCompatibleFilter = currentFilter === 'all'
@@ -4949,7 +4955,6 @@ function buildFilters() {
   }
   filters.innerHTML = '<div class="filter-group">' +
     legacyViewFilters.map(renderButton).join('') +
-    domainFilters.map(renderButton).join('') +
     '</div>';
 
   filters.onclick = function(e) {
@@ -5007,6 +5012,47 @@ function filterBuckets(buckets) {
     return buckets.filter(function(b) { return (b.domain || []).includes(d); });
   }
   return buckets;
+}
+
+function bucketCreatedTime(bucket) {
+  var created = String((bucket && bucket.created) || '').trim();
+  var parsed = created ? Date.parse(created) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function bucketWeightScore(bucket) {
+  var score = Number(bucket && bucket.score);
+  return Number.isFinite(score) ? score : 0;
+}
+
+function sortBucketsForDisplay(buckets) {
+  var sorted = (buckets || []).slice();
+  sorted.sort(function(a, b) {
+    var left = bucketSortMode === 'weight' ? bucketWeightScore(a) : bucketCreatedTime(a);
+    var right = bucketSortMode === 'weight' ? bucketWeightScore(b) : bucketCreatedTime(b);
+    if (left !== right) return bucketSortDescending ? right - left : left - right;
+    var leftCreated = bucketCreatedTime(a);
+    var rightCreated = bucketCreatedTime(b);
+    if (leftCreated !== rightCreated) return bucketSortDescending ? rightCreated - leftCreated : leftCreated - rightCreated;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+  return sorted;
+}
+
+function updateBucketSortToggle() {
+  var btn = document.getElementById('bucket-sort-toggle');
+  if (!btn) return;
+  var isWeight = bucketSortMode === 'weight';
+  var direction = bucketSortDescending ? '↓' : '↑';
+  btn.textContent = (isWeight ? '◆' : '⏱') + direction;
+  btn.title = isWeight ? '按权重倒序，点击切换为创建时间倒序' : '按创建时间倒序，点击切换为权重倒序';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+function toggleBucketSortMode() {
+  bucketSortMode = bucketSortMode === 'time' ? 'weight' : 'time';
+  updateBucketSortToggle();
+  renderBuckets(renderedBuckets);
 }
 
 function bucketBulkDeleteBlockReason(bucket) {
@@ -5211,18 +5257,20 @@ async function deleteSelectedBuckets() {
 
 function renderBuckets(buckets) {
   var list = document.getElementById('bucket-list');
-  renderedBuckets = (buckets || []).slice();
+  var sortedBuckets = sortBucketsForDisplay(buckets);
+  renderedBuckets = sortedBuckets;
+  updateBucketSortToggle();
   updateBucketBulkToolbar();
-  if (!buckets.length) {
+  if (!sortedBuckets.length) {
     list.innerHTML = '<div class="loading">没有记忆桶</div>';
     return;
   }
-  list.innerHTML = buckets.map(function(b) {
+  list.innerHTML = sortedBuckets.map(function(b) {
     var id = String(b.id || '');
     var icon = b.anchor ? '⚓' : b.pinned ? '📌' : b.type === 'feel' ? '🫧' : b.digested ? '🌿' : b.resolved ? '💤' : '💭';
     var vPos = Math.round(b.valence * 100);
     var modelV = b.model_valence != null ? ' → V' + b.model_valence.toFixed(1) : '';
-    var timeAgo = formatTimeAgo(b.last_active || b.created);
+    var timeAgo = formatTimeAgo(b.created || b.last_active);
     var domainLabel = [bucketCanonicalDomainLabel(b), bucketKind(b), bucketStatusView(b)].filter(Boolean).join(' · ');
     var canonicalLabel = bucketCanonicalDomainFullLabel(b);
     var legacyLabel = bucketLegacyDomain(b).join(', ');
