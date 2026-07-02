@@ -2331,28 +2331,22 @@ async def _auto_generate_moment_if_missing(content: str, *, section_fallback: bo
     return _insert_moment_after_leading_body(raw, generated_moment) if generated_moment else raw
 
 
-def _is_self_anchor_write_content(content: str, tags: list | tuple | set | None = None) -> bool:
-    if is_self_anchor_metadata({"tags": list(tags or [])}):
-        return True
-    sections = _profile_fact_sections(content)
-    return any(
-        _profile_key(key, "") in {
-            SELF_ANCHOR_TAG,
-            "self_anchor",
-            "self_identity",
-            "self-identity",
-            "first_person_anchor",
-            "first-person-anchor",
-        }
-        for key in sections
-    )
+def _is_self_anchor_write_content(
+    self_anchor: object = False,
+    domain: list | tuple | set | str | None = None,
+) -> bool:
+    return is_self_anchor_metadata({"self_anchor": self_anchor, "domain": domain or []})
 
 
 async def _auto_generate_write_moment_if_needed(
     content: str,
     tags: list | tuple | set | None = None,
+    *,
+    self_anchor: object = False,
+    domain: list | tuple | set | str | None = None,
 ) -> str:
-    if _is_self_anchor_write_content(content, tags):
+    _ = tags
+    if _is_self_anchor_write_content(self_anchor, domain):
         return str(content or "").strip()
     return await _auto_generate_moment_if_missing(content)
 
@@ -7983,7 +7977,7 @@ async def hold(
     suggested_name = title.strip() or analysis.get("suggested_name", "")
 
     all_tags = list(dict.fromkeys(auto_tags + extra_tags))
-    content = await _auto_generate_write_moment_if_needed(content, all_tags)
+    content = await _auto_generate_write_moment_if_needed(content, all_tags, domain=domain)
     classification = normalize_write_classification(
         memory_subject=analysis.get("memory_subject", ""),
         memory_layer=analysis.get("memory_layer", ""),
@@ -8234,7 +8228,11 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
                 "tags": [], "suggested_name": "",
             }
         fast_tags = analysis.get("tags", [])
-        content = await _auto_generate_write_moment_if_needed(content, fast_tags)
+        content = await _auto_generate_write_moment_if_needed(
+            content,
+            fast_tags,
+            domain=analysis.get("domain", ["general"]),
+        )
         fast_classification = normalize_write_classification(
             memory_subject=analysis.get("memory_subject", ""),
             memory_layer=analysis.get("memory_layer", ""),
@@ -8281,7 +8279,11 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
         try:
             item_tags = item.get("tags", [])
             item_content = _normalize_memory_sections_for_write(item.get("content", ""))
-            item_content = await _auto_generate_write_moment_if_needed(item_content, item_tags)
+            item_content = await _auto_generate_write_moment_if_needed(
+                item_content,
+                item_tags,
+                domain=item.get("domain", ["general"]),
+            )
             item_classification = normalize_write_classification(
                 memory_subject=item.get("memory_subject", ""),
                 memory_layer=item.get("memory_layer", ""),
@@ -9089,6 +9091,7 @@ async def api_create_memory(request):
     pinned = _bool_value(body.get("pinned"), False)
     protected = _bool_value(body.get("protected"), False)
     anchor = _bool_value(body.get("anchor"), False)
+    self_anchor = _bool_value(body.get("self_anchor"), False)
     resolved = _bool_value(body.get("resolved"), False)
     digested = _bool_value(body.get("digested"), False)
     event_date = str(body.get("date") or body.get("event_date") or "").strip()
@@ -9113,6 +9116,8 @@ async def api_create_memory(request):
             "last_active": str(body.get("last_active") or now),
             "updated_at": str(body.get("updated_at") or now),
         }
+        if "self_anchor" in body:
+            update_kwargs["extra_metadata"] = {"self_anchor": self_anchor}
         if event_date:
             update_kwargs["date"] = event_date
         ok = await bucket_mgr.update(
@@ -9151,6 +9156,7 @@ async def api_create_memory(request):
             last_active=str(body.get("last_active") or now),
             updated_at=str(body.get("updated_at") or now),
             date=event_date or None,
+            extra_metadata={"self_anchor": True} if self_anchor else None,
         )
         status = "created"
         if embedding_engine.enabled:
@@ -9158,7 +9164,7 @@ async def api_create_memory(request):
         else:
             embedding_status = "disabled"
 
-    if bucket_type != "feel" and not is_self_anchor_metadata({"tags": tags, "self_anchor": body.get("self_anchor")}):
+    if bucket_type != "feel" and not is_self_anchor_metadata({"self_anchor": self_anchor, "domain": domain}):
         _queue_memory_enrichment(bucket_id)
 
     return JSONResponse({

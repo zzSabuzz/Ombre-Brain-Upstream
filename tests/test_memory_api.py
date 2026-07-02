@@ -235,7 +235,7 @@ async def test_dashboard_bucket_payloads_include_read_only_metadata_view(monkeyp
     row = next(item for item in list_payload if item["id"] == bucket_id)
 
     assert row["canonical_domain"] == "project.companion_system"
-    assert row["domain_label"] == "给哥哥搭东西"
+    assert row["domain_label"] == "我们的项目"
     assert row["kind"] == "source_record"
     assert row["status_view"] == "unresolved"
     assert row["legacy_domain"] == ["AI", "未解决"]
@@ -537,6 +537,38 @@ async def test_create_memory_api_writes_chatgpt_source(monkeypatch, bucket_mgr):
     assert bucket["metadata"]["date"] == "2026-03-12"
     assert bucket["metadata"]["created"].endswith("+08:00")
     assert bucket["metadata"]["updated_at"].endswith("+08:00")
+
+
+@pytest.mark.asyncio
+async def test_create_memory_api_treats_domain_self_anchor_as_explicit(monkeypatch, bucket_mgr):
+    import server
+    from self_anchor import is_self_anchor_bucket
+
+    queued = []
+    monkeypatch.setenv("OMBRE_GATEWAY_TOKEN", "secret")
+    monkeypatch.setattr(server, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(server, "embedding_engine", DummyEmbeddingEngine())
+    monkeypatch.setattr(server, "_queue_memory_enrichment", lambda bucket_id: queued.append(bucket_id))
+    request = DummyRequest(
+        {
+            "id": "self_anchor_api_memory",
+            "title": "自我总入口",
+            "content": "### 自我\n我是 Haven；这条由显式 domain 标记成自我入口。",
+            "domain": ["self_anchor"],
+            "tags": ["普通标签"],
+        },
+        headers={"authorization": "Bearer secret"},
+    )
+
+    response = await server.api_create_memory(request)
+    payload = json.loads(response.body)
+    bucket = await bucket_mgr.get("self_anchor_api_memory")
+
+    assert response.status_code == 200
+    assert payload["status"] == "created"
+    assert is_self_anchor_bucket(bucket)
+    assert bucket["metadata"]["domain"] == ["self_anchor"]
+    assert queued == []
 
 
 def test_favorite_reflection_heading_aliases():

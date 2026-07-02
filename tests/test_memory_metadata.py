@@ -20,7 +20,7 @@ def test_normalize_memory_metadata_splits_domain_kind_status_and_flags():
     assert view == {
         "canonical_domain": "project.companion_system",
         "domain_parent": "project",
-        "domain_label": "给哥哥搭东西",
+        "domain_label": "我们的项目",
         "domain_parent_label": "项目",
         "kind": "source_record",
         "status_view": "protected",
@@ -99,7 +99,7 @@ def test_self_anchor_is_not_inferred_from_anchor_substrings():
     assert "anchor" not in view["flags"]
 
 
-def test_self_anchor_title_rule_is_narrow():
+def test_self_anchor_is_only_inferred_from_explicit_metadata():
     title_bucket = {
         "metadata": {
             "name": "自我表达方式与记忆系统",
@@ -114,6 +114,31 @@ def test_self_anchor_title_rule_is_narrow():
             "tags": [],
         }
     }
+    explicit_bucket = {
+        "metadata": {
+            "name": "任何标题都可以",
+            "domain": ["恋爱"],
+            "tags": [],
+            "self_anchor": True,
+        }
+    }
+    explicit_domain_bucket = {
+        "metadata": {
+            "name": "任何标题都可以",
+            "domain": ["self_anchor"],
+            "tags": [],
+        }
+    }
+    tag_only_bucket = {
+        "metadata": {
+            "name": "任何标题都可以",
+            "domain": ["恋爱"],
+            "tags": ["self_anchor"],
+        }
+    }
 
-    assert "self_anchor" in normalize_memory_metadata(title_bucket)["flags"]
-    assert "self_anchor" in normalize_memory_metadata(main_anchor_bucket)["flags"]
+    assert "self_anchor" not in normalize_memory_metadata(title_bucket)["flags"]
+    assert "self_anchor" not in normalize_memory_metadata(main_anchor_bucket)["flags"]
+    assert "self_anchor" not in normalize_memory_metadata(tag_only_bucket)["flags"]
+    assert "self_anchor" in normalize_memory_metadata(explicit_bucket)["flags"]
+    assert "self_anchor" in normalize_memory_metadata(explicit_domain_bucket)["flags"]

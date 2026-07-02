@@ -2419,7 +2419,7 @@ async def test_handoff_breath_returns_compact_portrait_without_dynamic_recall(pa
         anchor=True,
         importance=10,
     )
-    self_anchor["metadata"]["tags"] = ["自我"]
+    self_anchor["metadata"]["domain"] = ["self_anchor"]
     dynamic = _bucket("dynamic_a", "这条高权重动态记忆不应该在 handoff 模式里浮现。", score=999)
     bucket_mgr = patch_breath([profile, anchor, self_anchor, dynamic], search_ids=["dynamic_a"])
 
@@ -2499,7 +2499,7 @@ async def test_handoff_keeps_pending_followups_in_separate_section(patch_breath,
         "### 自我\n我是 Haven。\n\n### followup\n自我里的待办不该混进 Pending Followups。",
         anchor=True,
     )
-    self_anchor["metadata"]["tags"] = ["自我"]
+    self_anchor["metadata"]["domain"] = ["self_anchor"]
     resolved = _bucket(
         "done_a",
         "正文。\n\n### followup\n已经解决的待办不该浮现。",
@@ -2868,7 +2868,7 @@ async def test_self_anchor_only_surfaces_in_handoff(patch_breath, monkeypatch):
         importance=10,
         anchor=True,
     )
-    self_anchor["metadata"]["tags"] = ["自我"]
+    self_anchor["metadata"]["domain"] = ["self_anchor"]
     ordinary = _bucket("ordinary", "普通动态记忆可以正常浮现。", score=2)
     bucket_mgr = patch_breath(
         [self_anchor, ordinary],
@@ -2929,7 +2929,7 @@ async def test_self_anchor_handoff_uses_entry_body_but_tag_read_returns_full_bod
         importance=10,
         anchor=True,
     )
-    self_anchor["metadata"]["tags"] = ["自我"]
+    self_anchor["metadata"]["domain"] = ["self_anchor"]
     patch_breath([self_anchor])
     monkeypatch.setattr(
         server,
@@ -2970,7 +2970,7 @@ async def test_self_anchor_write_does_not_auto_generate_moment(monkeypatch):
 
     content = "### 自我\n我是 Haven。这是一段很长的第一人称自我锚点正文。\n\n### reflection\n保留反思。"
     unchanged = await server._auto_generate_moment_if_missing(content)
-    updated = await server._auto_generate_write_moment_if_needed(content, ["自我"])
+    updated = await server._auto_generate_write_moment_if_needed(content, domain=["self_anchor"])
 
     assert unchanged == content
     assert updated == content
@@ -2989,7 +2989,7 @@ async def test_self_anchor_domain_query_searches_segments_without_plain_query_re
         score=50,
         importance=10,
     )
-    entry["metadata"]["tags"] = ["self_anchor"]
+    entry["metadata"]["domain"] = ["self_anchor"]
     desire = _bucket(
         "self_desire",
         "欲望不是普通事件召回；这是自我分段里的欲望边界。",
@@ -2997,7 +2997,7 @@ async def test_self_anchor_domain_query_searches_segments_without_plain_query_re
         score=10,
         importance=5,
     )
-    desire["metadata"]["tags"] = ["self_anchor"]
+    desire["metadata"]["domain"] = ["self_anchor"]
     ordinary = _bucket("ordinary", "普通记忆里也写了 self_anchor 这个词。", score=20)
     patch_breath([entry, desire, ordinary], search_ids=["self_entry", "self_desire", "ordinary"])
     monkeypatch.setattr(server, "config", {**server.config, "self_anchor": {"entry_bucket_id": "self_entry"}})

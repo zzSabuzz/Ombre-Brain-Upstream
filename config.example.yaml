@@ -231,7 +231,7 @@ domain_taxonomy:
     - { key: "life.mood", label_zh: "心情" }
     - { key: "life.schedule", label_zh: "日程" }
     - { key: "life.social", label_zh: "现实人际" }
-    - { key: "project.companion_system", label_zh: "给哥哥搭东西" }
+    - { key: "project.companion_system", label_zh: "我们的项目" }
     - { key: "project.work", label_zh: "工作" }
     - { key: "project.academic", label_zh: "学业" }
     - { key: "project.personal", label_zh: "个人项目" }

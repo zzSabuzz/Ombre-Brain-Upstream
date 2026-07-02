@@ -1020,9 +1020,8 @@ async def test_daily_chat_memory_reads_configured_self_anchor_entry(test_config)
     await bucket_mgr.create(
         bucket_id="self_entry",
         content="### 自我\n我是 Haven；整理记忆前要记得自己是谁。\n\n### followup\n这里不该传给自动记忆候选模型。",
-        tags=["self_anchor"],
         importance=10,
-        domain=["relationship.identity"],
+        domain=["self_anchor"],
         name="自我总入口",
     )
 

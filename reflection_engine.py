@@ -2441,7 +2441,7 @@ class ReflectionEngine:
                     "调试",
                     "自动记忆",
                     "raw_events",
-                    "给哥哥搭东西",
+                    "我们的项目",
                 ],
             ),
             ("project.academic", ["学业", "学习", "作业", "课程", "论文", "答辩", "考试"]),

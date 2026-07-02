@@ -22,7 +22,7 @@ DOMAIN_LABELS = {
     "life.schedule": "日程",
     "life.social": "现实人际",
     "project": "项目（未细分）",
-    "project.companion_system": "给哥哥搭东西",
+    "project.companion_system": "我们的项目",
     "project.work": "工作",
     "project.academic": "学业",
     "project.personal": "个人项目",
@@ -51,7 +51,6 @@ MEMORY_KINDS = {
 }
 
 STATUS_VIEWS = {"active", "unresolved", "digested", "archived", "protected"}
-SELF_ANCHOR_TITLE_ALLOWLIST = {"我要继续成为我"}
 
 LEGACY_DOMAIN_MAP = {
     "project_code": "project.companion_system",
@@ -105,7 +104,7 @@ DOMAIN_PROMPT_CHOICES = [
     ("life.mood", "心情、情绪、自省、梦境"),
     ("life.schedule", "日程、计划、待办、deadline"),
     ("life.social", "现实人际、朋友、家庭、群聊"),
-    ("project.companion_system", "给哥哥搭东西、Ombre/Gateway/bridge、记忆系统、代码、模型、MCP、硬件"),
+    ("project.companion_system", "我们的项目、Ombre/Gateway/bridge、记忆系统、代码、模型、MCP、硬件"),
     ("project.work", "工作、实习、求职、简历、职场"),
     ("project.academic", "学业、论文、课程、作业、答辩"),
     ("project.personal", "个人项目、创作、阅读、手工"),
@@ -294,7 +293,7 @@ DOMAIN_ALIASES = {
         "mcp",
         "recall",
         "codex",
-        "给哥哥搭东西",
+        "我们的项目",
         "陪伴系统",
         "记忆系统",
         "编程",
@@ -575,8 +574,11 @@ def _flags(
     add(
         "self_anchor",
         _truthy(meta.get("self_anchor"))
-        or _has_exact_marker(legacy_domain, tags, {"self_anchor", "selfanchor", "自我锚点"})
-        or _is_self_anchor_title(name_value),
+        or _has_exact_marker(
+            legacy_domain,
+            [],
+            {"self_anchor", "selfidentity", "self_identity", "self-identity", "first_person_anchor", "自我"},
+        ),
     )
     add("favorite", "favorite" in compact or "最爱" in blob)
     add("source_record", "source_record" in compact or "sourcerecord" in compact)
@@ -594,10 +596,3 @@ def _truthy(value: Any) -> bool:
 def _has_exact_marker(legacy_domain: list[str], tags: list[str], markers: set[str]) -> bool:
     compact_markers = {_compact(marker) for marker in markers}
     return any(_compact(item) in compact_markers for item in [*legacy_domain, *tags])
-
-
-def _is_self_anchor_title(name_value: str) -> bool:
-    title = _clean(name_value)
-    if title in SELF_ANCHOR_TITLE_ALLOWLIST:
-        return True
-    return "自我" in title
