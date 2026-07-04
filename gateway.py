@@ -16354,6 +16354,15 @@ class GatewayService:
             or ('filename="time:' in lowered and "<attachment" in lowered)
         )
 
+    @staticmethod
+    def _text_contains_operit_activity_marker(text: str) -> bool:
+        raw = str(text or "")
+        return bool(
+            re.search(r"(?m)^\s*照顾备忘[：:].*只在合适时轻轻带一句", raw)
+            or re.search(r"(?m)^\s*-\s*\[reminder_id:[^\]\n]+\]", raw)
+            or re.search(r"(?m)^\s*=+\s*照顾备忘\s*=+\s*$", raw)
+        )
+
     def _split_operit_context_from_user_text(
         self,
         text: str,
@@ -16453,7 +16462,12 @@ class GatewayService:
                 continue
             if self._operit_section_is_stable(title, body):
                 stable_parts.append(part)
-            elif title in EXTERNAL_CONTEXT_BLOCK_TITLES or title or self._text_contains_operit_context(body):
+            elif (
+                title in EXTERNAL_CONTEXT_BLOCK_TITLES
+                or title
+                or self._text_contains_operit_context(body)
+                or self._text_contains_operit_activity_marker(body)
+            ):
                 activity_parts.append(part)
         return stable_parts, activity_parts
 

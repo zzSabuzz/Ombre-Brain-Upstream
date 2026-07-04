@@ -4775,6 +4775,53 @@ def test_gateway_operit_context_rewrite_splits_text_attachment_when_enabled(
     assert user_content.endswith("Current user message:\n猫咪最近又干了什么？")
 
 
+def test_gateway_operit_context_rewrite_keeps_bare_care_memo_activity(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    app, _, _, captured = _build_service(
+        monkeypatch,
+        _gateway_config(
+            test_config,
+            operit_context_rewrite_enabled=True,
+            recent_context_budget=0,
+            current_inner_state_interval_rounds=0,
+        ),
+        bucket_mgr,
+        embedding_results=[],
+    )
+    operit_extra = (
+        ' <attachment id="message_insert_extra_bundle_177757652230" '
+        'filename="Time:02:58 01/2026/6" type="text/plain" size="104">'
+        "照顾备忘：只在合适时轻轻带一句，不要机械复述。\n"
+        "- [reminder_id:meds-1] 2026-07-04 喝药: 小雨早晚各喝一次药。"
+        "</attachment>"
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer gateway-secret",
+                "X-Ombre-Session-Id": "sess-operit-care-memo-rewrite",
+            },
+            json={"messages": [{"role": "user", "content": "我写完作业了" + operit_extra}]},
+        )
+
+    assert response.status_code == 200
+    messages = captured[0]["json"]["messages"]
+    joined = _joined_message_content(messages)
+    user_content = next(str(message["content"]) for message in messages if message.get("role") == "user")
+    assert "Operit Activity Context" in user_content
+    assert "照顾备忘：只在合适时轻轻带一句" in user_content
+    assert "[reminder_id:meds-1]" in user_content
+    assert "早晚各喝一次药" in user_content
+    assert "Operit Stable Context" not in joined
+    assert "message_insert_extra_bundle_177757652230" not in joined
+    assert user_content.endswith("Current user message:\n我写完作业了")
+
+
 def test_gateway_operit_context_rewrite_allows_prior_tool_protocol(
     monkeypatch,
     test_config,
