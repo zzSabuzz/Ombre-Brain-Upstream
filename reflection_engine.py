@@ -1777,6 +1777,8 @@ class ReflectionEngine:
 
         item = await self._extract_daily_activity_summary(key, turns)
         if not item:
+            item = self._fallback_daily_activity_summary(key, turns)
+        if not item:
             return {
                 "status": "skipped",
                 "reason": "no_activity_summary",
@@ -1889,6 +1891,43 @@ class ReflectionEngine:
             "source_turn_ids": raw_turn_ids[:80],
             "source_event_ids": raw_event_ids[:160],
         }
+
+    def _fallback_daily_activity_summary(self, key: str, turns: list[dict]) -> dict:
+        fallback_turn_ids, fallback_event_ids = self._daily_chat_memory_window_source_ids(turns)
+        snippets = []
+        for turn in reversed(turns or []):
+            snippet = self._daily_activity_summary_excerpt(turn.get("user_text") or turn.get("assistant_text") or "")
+            if snippet:
+                snippets.append(snippet)
+            if len(snippets) >= 3:
+                break
+        snippets = list(reversed(list(dict.fromkeys(snippets))))
+        if not snippets:
+            return {}
+        joined = "；".join(snippets)
+        if len(joined) > 96:
+            joined = joined[:93].rstrip("，,；;、 ") + "..."
+        return self._normalize_daily_activity_summary(
+            key,
+            {
+                "summary": f"围绕{joined}继续推进。",
+                "confidence": 0.45,
+                "source_turn_ids": fallback_turn_ids,
+                "source_event_ids": fallback_event_ids,
+            },
+            turns,
+            source_turn_ids=fallback_turn_ids,
+            source_event_ids=fallback_event_ids,
+        )
+
+    @staticmethod
+    def _daily_activity_summary_excerpt(value: Any) -> str:
+        text = strip_wikilinks(str(value or "")).strip()
+        text = re.sub(r"```.*?```", " ", text, flags=re.S)
+        text = re.sub(r"<attachment\b[^>]*>.*?</attachment>", " ", text, flags=re.I | re.S)
+        text = re.sub(r"【当前时间】[^\n\r]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip(" -\t\r\n")
+        return text[:60].rstrip("，,；;、 ")
 
     def _daily_activity_summary_timestamp(self, key: str, turns: list[dict]) -> str:
         latest: datetime | None = None

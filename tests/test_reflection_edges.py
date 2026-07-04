@@ -1486,6 +1486,74 @@ async def test_daily_activity_summary_prefers_raw_events_not_auto_memory_candida
 
 
 @pytest.mark.asyncio
+async def test_daily_activity_summary_falls_back_when_model_returns_empty(test_config):
+    cfg = _no_api_config(test_config)
+    engine = ReflectionEngine(cfg)
+    engine.daily_chat_memory_client = RecordingChatClient("")
+    now = datetime(2026, 7, 4, 23, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class RawEventStore:
+        def list_events_between(self, *, start_at, end_at, limit):
+            return [
+                {
+                    "id": 401,
+                    "role": "user",
+                    "text": "继续查 handoff 为什么没有新的一天。",
+                    "created_at": "2026-07-04T22:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 1},
+                },
+                {
+                    "id": 402,
+                    "role": "assistant",
+                    "text": "自动记忆 review 模式会先生成 pending candidate。",
+                    "created_at": "2026-07-04T22:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 1},
+                },
+                {
+                    "id": 403,
+                    "role": "user",
+                    "text": "补一个不从自动记忆读取的 Recent Timeline fallback。",
+                    "created_at": "2026-07-04T23:00:00+08:00",
+                    "conversation_id": "daily-chat",
+                    "session_id": "daily-chat",
+                    "client": "gateway",
+                    "metadata": {"profile_id": "haven_xiaoyu", "round_id": 2},
+                },
+            ]
+
+    class ConversationTurnStore:
+        def list_conversation_turns_between(self, **kwargs):
+            raise AssertionError("activity summary should use raw_events before conversation_turns")
+
+    class Persona:
+        profile_id = "haven_xiaoyu"
+
+    result = await engine.run_daily_activity_summary(
+        conversation_turn_store=ConversationTurnStore(),
+        raw_event_store=RawEventStore(),
+        persona_engine=Persona(),
+        now=now,
+    )
+
+    assert result["status"] == "ready"
+    assert result["turn_source"] == "raw_events"
+    item = result["activity_summary"]
+    assert item["timeline_id"] == "daily_activity_summary:2026-07-04"
+    assert item["source"] == "daily_activity_summary"
+    assert item["scope"] == "doing"
+    assert item["confidence"] == 0.45
+    assert item["source_event_ids"] == [401, 402, 403]
+    assert "Recent Timeline fallback" in item["text"]
+    assert engine.daily_chat_memory_client.calls
+
+
+@pytest.mark.asyncio
 async def test_daily_chat_memory_summarizes_overlapping_windows_for_review(test_config, monkeypatch):
     cfg = _no_api_config(test_config)
     cfg["identity"] = {
