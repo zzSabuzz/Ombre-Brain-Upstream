@@ -52,6 +52,7 @@ from memory_relevance import (
     recall_topic_query,
     relevance_multiplier,
 )
+from query_prompts import MEMORY_SENTINEL_SYSTEM_PROMPT, QUERY_PLANNER_SYSTEM_PROMPT
 from memory_layers import (
     CONTEXT_ONLY_SECTIONS,
     LAYER_SOURCE_RECORD,
@@ -75,9 +76,12 @@ from query_terms import (
     LOW_SIGNAL_AFFECTION_TERMS,
     LOW_SIGNAL_CHECKIN_TERMS,
     MEMORY_SENTINEL_RESIDUE_STRIP_TERMS,
+    QUERY_PLANNER_GENERIC_TERMS,
+    SOURCE_RECORD_FRAGMENT_TOPIC_STOPWORDS,
     date_recall_shell_terms,
     identity_address_terms,
 )
+from recall_eval import RECALL_EVAL_BLOCKED_SECTIONS, RECALL_EVAL_DEFAULT_CASES
 from recall_policy import QueryAnchorPlan, RecallPolicy, diffusion_seed_topic_term_has_specific_residue
 from memory_nodes import MemoryNodeStore
 from persona_engine import PersonaStateEngine
@@ -119,121 +123,6 @@ DOMAIN_SENTINEL_ALLOWED_DOMAINS = frozenset(
         "general",
     }
 )
-RECALL_EVAL_DEFAULT_CASES = [
-    {
-        "id": "light_checkin_no_memory",
-        "query": "在做什么呢",
-        "expect": "none",
-    },
-    {
-        "id": "cuddle_no_memory",
-        "query": "想你了抱抱",
-        "expect": "none",
-    },
-    {
-        "id": "laugh_no_memory",
-        "query": "哈哈",
-        "expect": "none",
-    },
-    {
-        "id": "ack_no_memory",
-        "query": "嗯嗯",
-        "expect": "none",
-    },
-    {
-        "id": "ping_no_memory",
-        "query": "ping",
-        "expect": "none",
-    },
-]
-RECALL_EVAL_BLOCKED_SECTIONS = (
-    "Recalled Memory",
-    "Diffused Memory",
-    "Recent Context",
-    "Date Recall",
-    "Date Persona Trace",
-    "Just Now Chat Context",
-    "Targeted Memory Detail",
-    "Memory Detail Request",
-)
-QUERY_PLANNER_GENERIC_TERMS = {
-    "recent",
-    "memory",
-    "context",
-    "current",
-    "remember",
-    "emotion",
-    "status",
-    "thing",
-    "user",
-    "assistant",
-    "最近",
-    "记忆",
-    "上下文",
-    "当前",
-    "现在",
-    "记得",
-    "情绪",
-    "状态",
-    "事情",
-    "用户",
-    "助手",
-    "聊天",
-    "对话",
-}
-SOURCE_RECORD_FRAGMENT_TOPIC_STOPWORDS = QUERY_PLANNER_GENERIC_TERMS | {
-    "一下",
-    "一次",
-    "今天",
-    "昨天",
-    "明天",
-    "现在",
-    "当前",
-    "刚才",
-    "刚刚",
-    "每天",
-    "这次",
-    "那次",
-    "这个",
-    "那个",
-    "这条",
-    "那条",
-    "什么",
-    "为什么",
-    "怎么",
-    "知道",
-    "想起",
-    "想起来",
-    "可以",
-    "是不是",
-    "有没有",
-    "相关",
-    "相关联",
-    "里面",
-    "写着",
-    "提出",
-    "答应",
-    "爸爸",
-    "妈妈",
-    "爸爸妈妈",
-    "ai",
-    "模型",
-    "工具",
-    "记忆工具",
-    "亲密",
-    "承诺",
-    "关系",
-    "角色",
-    "扮演",
-    "身体",
-    "欲望",
-    "占有",
-    "归属",
-    "做爱",
-    "夜晚",
-    "这一幕",
-    "两人",
-} | set(DEFAULT_AI_ADDRESS_TERMS)
 MEMORY_DETAIL_REQUEST_RE = re.compile(
     r"^\s*\[memory_detail\s+ids\s*=\s*([\"'])(?P<ids>[^\"']+)\1\s*\]\s*",
     re.IGNORECASE,
@@ -267,46 +156,6 @@ EXACT_ANCHOR_COMPOUND_RE = re.compile(
     r"[A-Za-z][A-Za-z0-9]+(?:[-_:./][A-Za-z0-9]+)+"
     r"(?![A-Za-z0-9])"
 )
-QUERY_PLANNER_SYSTEM_PROMPT = """You are Ombre Memory Query Planner.
-Return only strict JSON. Do not write memory. Do not choose final memories.
-Split the user's long mixed message into 1-3 short memory search anchors.
-Each query must be concrete and should preserve names, projects, people, places, or events.
-For a short emotional reason lookup, preserve emotion+state/event anchors such as 激动哭, 难过睡不着, 妈妈 委屈, or 焦虑 简历 when they are the user's actual anchor.
-Each query must include must_terms: concrete words that a candidate memory should contain at least one of.
-Do not include generic terms such as recent, memory, context, current, remember, emotion, status, or the single word 哭.
-If the message is too vague or has no searchable memory anchor, return should_search=false.
-Schema:
-{
-  "should_search": true,
-  "too_vague": false,
-  "queries": [
-    {
-      "query": "short search anchor",
-      "must_terms": ["concrete", "terms"],
-      "intent": "short reason",
-      "risk": "low|medium|high"
-    }
-  ]
-}
-"""
-MEMORY_SENTINEL_SYSTEM_PROMPT = """You are Ombre Memory Sentinel.
-Return only strict JSON. Do not write memory. Do not choose final memories.
-Classify whether the latest user message needs long-term memory search.
-Use the recent turns only to resolve vague followups such as 后来呢, 那件事, or 接着刚才.
-Routes:
-- search: the user is asking for old context, a past event, a reason/background, or a followup whose referent is in recent turns.
-- tone_only: affectionate, intimate, comfort, or light emotional contact where familiar tone may help but old events should not be retrieved.
-- skip: pure acknowledgement, laughter, ping/test, empty reaction, or no useful memory anchor.
-Do not treat generic affection, crying, missing, hugging, presence checks, or status check-ins as search unless recent turns provide a concrete old-event referent.
-If searchable, include concrete anchors only; omit generic words such as memory, recent, context, remember, emotion, status, 哭, 想你, 抱抱.
-Schema:
-{
-  "route": "search",
-  "reason": "short reason",
-  "anchors": ["concrete anchor"],
-  "confidence": 0.8
-}
-"""
 IDENTITY_NAME_INTENT_MARKERS = (
     "中文名",
     "英文名",
