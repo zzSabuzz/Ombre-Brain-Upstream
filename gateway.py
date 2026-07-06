@@ -423,21 +423,9 @@ class GatewayService:
             self.gateway_cfg.get("domain_sentinel_enabled"),
             True,
         )
-        self.domain_sentinel_model = str(
-            self.gateway_cfg.get("domain_sentinel_model") or "Qwen/Qwen3-8B"
-        ).strip()
-        self.domain_sentinel_base_url = str(
-            self.gateway_cfg.get("domain_sentinel_base_url")
-            or self.embedding_cfg.get("base_url")
-            or ""
-        ).strip().rstrip("/")
-        self.domain_sentinel_api_key = str(
-            os.environ.get("OMBRE_DOMAIN_SENTINEL_API_KEY", "")
-            or self.gateway_cfg.get("domain_sentinel_api_key", "")
-            or os.environ.get("OMBRE_EMBEDDING_API_KEY", "")
-            or self.embedding_cfg.get("api_key", "")
-            or ""
-        ).strip()
+        self.domain_sentinel_model = self._resolve_domain_sentinel_model()
+        self.domain_sentinel_base_url = self._resolve_domain_sentinel_base_url()
+        self.domain_sentinel_api_key = self._resolve_domain_sentinel_api_key()
         self.domain_sentinel_max_tokens = max(
             128,
             min(800, int(self.gateway_cfg.get("domain_sentinel_max_tokens", 260))),
@@ -1159,12 +1147,14 @@ class GatewayService:
             self.gateway_cfg["domain_sentinel_enabled"] = self.domain_sentinel_enabled
             updated.append("gateway.domain_sentinel_enabled")
         if "domain_sentinel_model" in payload:
-            self.domain_sentinel_model = str(payload["domain_sentinel_model"] or "").strip()
-            self.gateway_cfg["domain_sentinel_model"] = self.domain_sentinel_model
+            configured_model = str(payload["domain_sentinel_model"] or "").strip()
+            self.domain_sentinel_model = self._resolve_domain_sentinel_model(configured_model)
+            self.gateway_cfg["domain_sentinel_model"] = configured_model
             updated.append("gateway.domain_sentinel_model")
         if "domain_sentinel_base_url" in payload:
-            self.domain_sentinel_base_url = str(payload["domain_sentinel_base_url"] or "").strip().rstrip("/")
-            self.gateway_cfg["domain_sentinel_base_url"] = self.domain_sentinel_base_url
+            configured_base_url = str(payload["domain_sentinel_base_url"] or "").strip()
+            self.domain_sentinel_base_url = self._resolve_domain_sentinel_base_url(configured_base_url)
+            self.gateway_cfg["domain_sentinel_base_url"] = configured_base_url
             updated.append("gateway.domain_sentinel_base_url")
         if "domain_sentinel_api_key" in payload and payload["domain_sentinel_api_key"]:
             self.domain_sentinel_api_key = str(payload["domain_sentinel_api_key"] or "").strip()
@@ -1359,6 +1349,55 @@ class GatewayService:
             updated.append("gateway.memory_detail_recall_budget")
         return updated
 
+    def _apply_dehydration_config(self, payload: dict[str, Any]) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        dehy_cfg = self.config.setdefault("dehydration", {})
+        updated: list[str] = []
+        for key in ("model", "base_url", "max_tokens", "temperature", "thinking_mode"):
+            if key in payload:
+                dehy_cfg[key] = payload[key]
+                updated.append(f"dehydration.{key}")
+        if "api_key" in payload and payload["api_key"]:
+            dehy_cfg["api_key"] = str(payload["api_key"])
+            updated.append("dehydration.api_key")
+
+        self.dehydrator.model = str(dehy_cfg.get("model") or getattr(self.dehydrator, "model", "") or "").strip()
+        self.dehydrator.base_url = str(
+            dehy_cfg.get("base_url") or getattr(self.dehydrator, "base_url", "") or ""
+        ).strip()
+        self.dehydrator.api_key = str(
+            dehy_cfg.get("api_key") or getattr(self.dehydrator, "api_key", "") or ""
+        ).strip()
+        normalize_thinking = getattr(self.dehydrator, "_normalize_thinking_mode", None)
+        if callable(normalize_thinking):
+            self.dehydrator.thinking_mode = normalize_thinking(dehy_cfg.get("thinking_mode", ""))
+        else:
+            self.dehydrator.thinking_mode = str(dehy_cfg.get("thinking_mode") or "").strip()
+        self.dehydrator.max_tokens = dehy_cfg.get("max_tokens", getattr(self.dehydrator, "max_tokens", 1024))
+        self.dehydrator.temperature = dehy_cfg.get("temperature", getattr(self.dehydrator, "temperature", 0.1))
+        self.dehydrator.api_available = bool(self.dehydrator.api_key)
+        if self.dehydrator.api_key and self.dehydrator.base_url:
+            from openai import AsyncOpenAI
+
+            self.dehydrator.client = AsyncOpenAI(
+                api_key=self.dehydrator.api_key,
+                base_url=self.dehydrator.base_url,
+            )
+
+        if not str(self.gateway_cfg.get("query_planner_model") or "").strip():
+            (
+                self.query_planner_model,
+                self.query_planner_uses_dehydrator,
+            ) = self._resolve_query_planner_model("")
+        if not str(self.gateway_cfg.get("domain_sentinel_model") or "").strip():
+            self.domain_sentinel_model = self._resolve_domain_sentinel_model("")
+        if not str(self.gateway_cfg.get("domain_sentinel_base_url") or "").strip():
+            self.domain_sentinel_base_url = self._resolve_domain_sentinel_base_url("")
+        if not str(self.gateway_cfg.get("domain_sentinel_api_key") or "").strip():
+            self.domain_sentinel_api_key = self._resolve_domain_sentinel_api_key("")
+        return updated
+
     def _apply_reranker_config(self, payload: dict[str, Any]) -> list[str]:
         if not isinstance(payload, dict):
             return []
@@ -1502,12 +1541,14 @@ class GatewayService:
             return JSONResponse({"error": "invalid config"}, status_code=400)
 
         gateway_payload = body.get("gateway")
+        dehydration_payload = body.get("dehydration")
         diffusion_payload = body.get("memory_diffusion")
         reranker_payload = body.get("reranker")
         persona_payload = body.get("persona")
         dream_payload = body.get("dream")
         if (
             gateway_payload is None
+            and dehydration_payload is None
             and diffusion_payload is None
             and reranker_payload is None
             and persona_payload is None
@@ -1516,6 +1557,8 @@ class GatewayService:
             gateway_payload = body
         if gateway_payload is not None and not isinstance(gateway_payload, dict):
             return JSONResponse({"error": "invalid gateway config"}, status_code=400)
+        if dehydration_payload is not None and not isinstance(dehydration_payload, dict):
+            return JSONResponse({"error": "invalid dehydration config"}, status_code=400)
         if diffusion_payload is not None and not isinstance(diffusion_payload, dict):
             return JSONResponse({"error": "invalid memory diffusion config"}, status_code=400)
         if reranker_payload is not None and not isinstance(reranker_payload, dict):
@@ -1526,6 +1569,8 @@ class GatewayService:
             return JSONResponse({"error": "invalid dream config"}, status_code=400)
 
         updated = []
+        if dehydration_payload is not None:
+            updated.extend(self._apply_dehydration_config(dehydration_payload))
         if gateway_payload is not None:
             updated.extend(self._apply_gateway_memory_config(gateway_payload))
         if diffusion_payload is not None:
@@ -11881,6 +11926,56 @@ class GatewayService:
         if self._query_requests_direct_detail(text) or self.recall_policy.is_detail_read_query(text):
             return True
         return False
+
+    def _resolve_domain_sentinel_model(self, configured_model: Any = None) -> str:
+        if configured_model is None:
+            configured_model = self.gateway_cfg.get("domain_sentinel_model")
+        explicit_model = str(configured_model or "").strip()
+        if explicit_model:
+            return explicit_model
+        model = str(getattr(self.dehydrator, "model", "") or "").strip()
+        if not model:
+            dehy_cfg = self.config.get("dehydration", {})
+            if isinstance(dehy_cfg, dict):
+                model = str(dehy_cfg.get("model") or "").strip()
+        return model
+
+    def _resolve_domain_sentinel_base_url(self, configured_base_url: Any = None) -> str:
+        if configured_base_url is None:
+            configured_base_url = self.gateway_cfg.get("domain_sentinel_base_url")
+        explicit_base_url = str(configured_base_url or "").strip().rstrip("/")
+        if explicit_base_url:
+            return explicit_base_url
+        base_url = str(getattr(self.dehydrator, "base_url", "") or "").strip().rstrip("/")
+        if not base_url:
+            dehy_cfg = self.config.get("dehydration", {})
+            if isinstance(dehy_cfg, dict):
+                base_url = str(dehy_cfg.get("base_url") or "").strip().rstrip("/")
+        if not base_url:
+            base_url = str(self.embedding_cfg.get("base_url") or "").strip().rstrip("/")
+        return base_url
+
+    def _resolve_domain_sentinel_api_key(self, configured_api_key: Any = None) -> str:
+        if configured_api_key is None:
+            configured_api_key = self.gateway_cfg.get("domain_sentinel_api_key")
+        env_api_key = str(os.environ.get("OMBRE_DOMAIN_SENTINEL_API_KEY", "") or "").strip()
+        if env_api_key:
+            return env_api_key
+        explicit_api_key = str(configured_api_key or "").strip()
+        if explicit_api_key:
+            return explicit_api_key
+        dehy_cfg = self.config.get("dehydration", {})
+        dehy_api_key = ""
+        if isinstance(dehy_cfg, dict):
+            dehy_api_key = str(dehy_cfg.get("api_key") or "").strip()
+        return str(
+            dehy_api_key
+            or getattr(self.dehydrator, "api_key", "")
+            or os.environ.get("OMBRE_API_KEY", "")
+            or os.environ.get("OMBRE_EMBEDDING_API_KEY", "")
+            or self.embedding_cfg.get("api_key", "")
+            or ""
+        ).strip()
 
     async def _route_domain_sentinel(self, query: str) -> dict[str, Any]:
         debug = self._domain_sentinel_rule_plan(query)

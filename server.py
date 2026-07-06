@@ -11221,12 +11221,16 @@ async def api_config_get(request):
     reflection_cfg = config.get("reflection", {}) if isinstance(config.get("reflection", {}), dict) else {}
     portrait_cfg = config.get("portrait", {}) if isinstance(config.get("portrait", {}), dict) else {}
     self_anchor_cfg = config.get("self_anchor", {}) if isinstance(config.get("self_anchor", {}), dict) else {}
+    domain_sentinel_configured_model = str(gateway_cfg.get("domain_sentinel_model") or "").strip()
+    domain_sentinel_effective_model = domain_sentinel_configured_model or str(dehy.get("model") or "").strip()
     domain_sentinel_base_url = str(
-        gateway_cfg.get("domain_sentinel_base_url") or emb.get("base_url") or ""
+        gateway_cfg.get("domain_sentinel_base_url") or dehy.get("base_url") or emb.get("base_url") or ""
     ).strip()
     domain_sentinel_api_key = str(
         os.environ.get("OMBRE_DOMAIN_SENTINEL_API_KEY", "")
         or gateway_cfg.get("domain_sentinel_api_key", "")
+        or dehy.get("api_key", "")
+        or os.environ.get("OMBRE_API_KEY", "")
         or os.environ.get("OMBRE_EMBEDDING_API_KEY", "")
         or emb.get("api_key", "")
         or ""
@@ -11286,7 +11290,8 @@ async def api_config_get(request):
             "related_memory_budget": gateway_cfg.get("related_memory_budget", 220),
             "memory_sentinel_enabled": _bool_value(gateway_cfg.get("memory_sentinel_enabled"), True),
             "domain_sentinel_enabled": _bool_value(gateway_cfg.get("domain_sentinel_enabled"), True),
-            "domain_sentinel_model": gateway_cfg.get("domain_sentinel_model") or "Qwen/Qwen3-8B",
+            "domain_sentinel_model": domain_sentinel_configured_model,
+            "domain_sentinel_effective_model": domain_sentinel_effective_model,
             "domain_sentinel_base_url": str(gateway_cfg.get("domain_sentinel_base_url") or ""),
             "domain_sentinel_effective_base_url": domain_sentinel_base_url,
             "domain_sentinel_api_key_masked": _mask_key(domain_sentinel_api_key),
@@ -11554,11 +11559,13 @@ async def api_config_update(request):
             sanitized["chain_max_frontier"] = _int_between(payload.get("chain_max_frontier"), 24, 1, 200)
         return sanitized
 
+    gateway_hot_update_payload = {}
+
     # --- Dehydration config ---
     if "dehydration" in body:
         d = body["dehydration"]
         dehy = config.setdefault("dehydration", {})
-        for key in ("model", "base_url", "max_tokens", "temperature"):
+        for key in ("model", "base_url", "max_tokens", "temperature", "thinking_mode"):
             if key in d:
                 dehy[key] = d[key]
                 updated.append(f"dehydration.{key}")
@@ -11570,12 +11577,28 @@ async def api_config_update(request):
         dehydrator.model = dehy.get("model", "deepseek-chat")
         dehydrator.base_url = dehy.get("base_url", "")
         dehydrator.api_key = dehy.get("api_key", "")
+        normalize_thinking = getattr(dehydrator, "_normalize_thinking_mode", None)
+        if callable(normalize_thinking):
+            dehydrator.thinking_mode = normalize_thinking(dehy.get("thinking_mode", ""))
+        else:
+            dehydrator.thinking_mode = str(dehy.get("thinking_mode") or "").strip()
+        dehydrator.max_tokens = dehy.get("max_tokens", 1024)
+        dehydrator.temperature = dehy.get("temperature", 0.1)
+        dehydrator.api_available = bool(dehydrator.api_key)
         if hasattr(dehydrator, "client") and dehydrator.api_key:
             from openai import AsyncOpenAI
             dehydrator.client = AsyncOpenAI(
                 api_key=dehydrator.api_key,
                 base_url=dehydrator.base_url,
             )
+        gateway_hot_update_payload["dehydration"] = {
+            "model": dehydrator.model,
+            "base_url": dehydrator.base_url,
+            "api_key": dehydrator.api_key,
+            "thinking_mode": dehy.get("thinking_mode", ""),
+            "max_tokens": dehy.get("max_tokens", 1024),
+            "temperature": dehy.get("temperature", 0.1),
+        }
 
     # --- Embedding config ---
     if "embedding" in body:
@@ -11619,7 +11642,6 @@ async def api_config_update(request):
         config["merge_threshold"] = int(body["merge_threshold"])
         updated.append("merge_threshold")
 
-    gateway_hot_update_payload = {}
     # --- Reranker config ---
     if "reranker" in body:
         r = body["reranker"]

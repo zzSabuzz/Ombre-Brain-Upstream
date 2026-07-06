@@ -2909,18 +2909,18 @@
       <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">hook recall 只让它判断开哪些域，不让它决定有没有记忆</div>
       <div class="config-row">
         <label>主域模型</label>
-        <input type="text" id="cfg-domain-sentinel-model" placeholder="Qwen/Qwen3-8B" />
+        <input type="text" id="cfg-domain-sentinel-model" placeholder="留空复用脱水模型" />
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">默认 Qwen/Qwen3-8B；失败会回到规则分类；思考强制关闭</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">推荐用便宜快速的模型</div>
       <div class="config-row">
         <label>Base URL</label>
-        <input type="text" id="cfg-domain-sentinel-url" placeholder="留空复用 Embedding 地址" />
+        <input type="text" id="cfg-domain-sentinel-url" placeholder="留空复用脱水地址" />
       </div>
       <div class="config-row">
         <label>API Key</label>
         <input type="password" id="cfg-domain-sentinel-key" placeholder="当前: 加载中…" />
       </div>
-      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空复用 Embedding 配置；点击“保存密钥到 .env”后重启仍保留</div>
+      <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空复用脱水配置；点击“保存密钥到 .env”后重启仍保留</div>
     </div>
 
     <div class="config-section">
@@ -7597,7 +7597,7 @@ async function loadConfig() {
     document.getElementById('cfg-domain-sentinel-url').value =
       (cfg.gateway && cfg.gateway.domain_sentinel_base_url) || '';
     document.getElementById('cfg-domain-sentinel-key').placeholder =
-      '当前: ' + ((cfg.gateway && cfg.gateway.domain_sentinel_api_key_masked) || ((cfg.gateway && cfg.gateway.domain_sentinel_api_ready) ? '***' : '复用 Embedding/未设置'));
+      '当前: ' + ((cfg.gateway && cfg.gateway.domain_sentinel_api_key_masked) || ((cfg.gateway && cfg.gateway.domain_sentinel_api_ready) ? '***' : '复用脱水/未设置'));
     document.getElementById('cfg-domain-sentinel-key').value = '';
     document.getElementById('cfg-query-resurface-enabled').value =
       (cfg.recall && cfg.recall.query_resurface_enabled) ? 'true' : 'false';

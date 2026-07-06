@@ -3639,7 +3639,7 @@ async def test_config_get_reports_effective_dream_engine_values(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_config_get_domain_sentinel_reuses_embedding_by_default(monkeypatch):
+async def test_config_get_domain_sentinel_reuses_dehydration_by_default(monkeypatch):
     import server
 
     monkeypatch.setattr(server, "_require_dashboard_auth", lambda request: None)
@@ -3650,6 +3650,12 @@ async def test_config_get_domain_sentinel_reuses_embedding_by_default(monkeypatc
         "config",
         {
             **server.config,
+            "dehydration": {
+                **server.config.get("dehydration", {}),
+                "model": "dehy-mini",
+                "base_url": "https://dehy.example/v1",
+                "api_key": "dehydration-secret",
+            },
             "embedding": {
                 **server.config.get("embedding", {}),
                 "base_url": "https://embedding.example/v1",
@@ -3666,10 +3672,11 @@ async def test_config_get_domain_sentinel_reuses_embedding_by_default(monkeypatc
     response = await server.api_config_get(DummyRequest())
     payload = json.loads(response.body)
 
-    assert payload["gateway"]["domain_sentinel_model"] == "Qwen/Qwen3-8B"
+    assert payload["gateway"]["domain_sentinel_model"] == ""
+    assert payload["gateway"]["domain_sentinel_effective_model"] == "dehy-mini"
     assert payload["gateway"]["domain_sentinel_base_url"] == ""
-    assert payload["gateway"]["domain_sentinel_effective_base_url"] == "https://embedding.example/v1"
-    assert payload["gateway"]["domain_sentinel_api_key_masked"] == "embe...cret"
+    assert payload["gateway"]["domain_sentinel_effective_base_url"] == "https://dehy.example/v1"
+    assert payload["gateway"]["domain_sentinel_api_key_masked"] == "dehy...cret"
     assert payload["gateway"]["domain_sentinel_api_ready"] is True
     assert payload["gateway"]["domain_sentinel_enable_thinking"] is False
 

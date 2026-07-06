@@ -1291,6 +1291,34 @@ def test_gateway_query_planner_defaults_to_dehydration_model(monkeypatch, test_c
     assert captured == []
 
 
+def test_gateway_domain_sentinel_defaults_to_dehydration_model(monkeypatch, test_config, bucket_mgr):
+    cfg = _gateway_config(
+        {
+            **test_config,
+            "dehydration": {
+                **test_config.get("dehydration", {}),
+                "model": "dehy-mini",
+                "base_url": "https://dehy.example/v1",
+                "api_key": "dehydration-secret",
+            },
+            "embedding": {
+                **test_config.get("embedding", {}),
+                "base_url": "https://embedding.example/v1",
+                "api_key": "embedding-secret",
+            },
+        },
+        domain_sentinel_enabled=True,
+        domain_sentinel_model="",
+        domain_sentinel_base_url="",
+    )
+
+    _, service, _, _ = _build_service(monkeypatch, cfg, bucket_mgr)
+
+    assert service.domain_sentinel_model == "dehy-mini"
+    assert service.domain_sentinel_base_url == "https://dehy.example/v1"
+    assert service.domain_sentinel_api_key == "dehydration-secret"
+
+
 def test_gateway_memory_sentinel_rule_sentinel_defaults_on(monkeypatch, test_config, bucket_mgr):
     _, service, _, _ = _build_service(
         monkeypatch,

@@ -445,6 +445,7 @@ def test_dashboard_exposes_gateway_memory_cooldown_settings():
     assert "cfg.gateway.domain_sentinel_model" in html
     assert "cfg.gateway.domain_sentinel_base_url" in html
     assert "cfg.gateway.domain_sentinel_api_key_masked" in html
+    assert "推荐用便宜快速的模型" in html
     assert "cfg.gateway.domain_sentinel_enable_thinking" not in html
     assert "cfg.gateway.query_planner_model" not in html
     assert "cfg.gateway.memory_detail_recall_enabled" in html
