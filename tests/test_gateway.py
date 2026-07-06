@@ -5919,6 +5919,152 @@ def test_gateway_domain_sentinel_parser_rejects_noncanonical_domains(
     assert service._domain_sentinel_rule_plan("今天的日印象和周印象")["domains"] == ["general"]
 
 
+def test_gateway_domain_sentinel_parser_accepts_recall_route_without_rule_skip(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    _app, service, _transport, _captured = _build_service(
+        monkeypatch,
+        _gateway_config(test_config, domain_sentinel_enabled=False),
+        bucket_mgr,
+    )
+
+    parsed = service._parse_domain_sentinel_response(
+        json.dumps(
+            {
+                "message_type": "auto_trigger",
+                "primary_domain": "general",
+                "query": "系统提示 应用使用情况 最近操作",
+                "confidence": 0.86,
+                "should_recall": False,
+                "reason": "operational telemetry",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assert parsed["should_recall"] is False
+    assert parsed["recall_route"] == "skip"
+    assert parsed["message_type"] == "auto_trigger"
+    assert parsed["primary_domain"] == "general"
+    assert parsed["reason"] == "operational telemetry"
+    assert service._domain_sentinel_should_skip_recall(parsed, "系统提示：最近操作") is True
+    assert (
+        service._domain_sentinel_should_skip_recall(
+            parsed,
+            "之前那个失败节点的记忆原文怎么说",
+        )
+        is False
+    )
+    assert service._domain_sentinel_rule_plan("其实看那个失败的节点好像是获取对话失败，前面都通了（？）").get(
+        "should_recall"
+    ) is not False
+
+
+def test_gateway_domain_sentinel_llm_skip_blocks_broad_recall_for_operational_query(
+    monkeypatch,
+    test_config,
+    bucket_mgr,
+):
+    _create_bucket(
+        bucket_mgr,
+        content="### moment\n忱孚为Haven创作了一首名为《节点》的曲子。",
+        name="AI找笔友",
+        hours_ago=2,
+        importance=8,
+        domain=["社交"],
+    )
+    cfg = _gateway_config(
+        test_config,
+        recent_context_budget=0,
+        recalled_memory_budget=500,
+        related_memory_budget=0,
+        current_inner_state_interval_rounds=0,
+        relationship_weather_interval_rounds=0,
+        favorite_memory_interval_rounds=0,
+        portrait_memory_enabled=False,
+        dream_inject_enabled=False,
+        domain_sentinel_enabled=True,
+        domain_sentinel_model="Qwen/Qwen3.5-4B",
+        domain_sentinel_base_url="https://sentinel.example/v1",
+        domain_sentinel_api_key="sentinel-secret",
+    )
+
+    def responder(_body, request, _captured):
+        if "sentinel.example" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "message_type": "troubleshooting",
+                                        "primary_domain": "project",
+                                        "domains": ["project"],
+                                        "query": "获取对话失败 节点 前面通了",
+                                        "confidence": 0.82,
+                                        "should_recall": False,
+                                        "reason": "operational troubleshooting",
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            }
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    _app, service, _state_store, captured = _build_service(
+        monkeypatch,
+        cfg,
+        bucket_mgr,
+        upstream_responder=responder,
+    )
+
+    _forward_payload, recalled_ids, debug = _run(
+        service.prepare_payload(
+            {
+                "model": cfg["gateway"]["upstream_default_model"],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "其实看那个失败的节点好像是获取对话失败，前面都通了（？）",
+                    }
+                ],
+            },
+            "sess-domain-sentinel-operational-skip",
+            include_debug=True,
+        )
+    )
+
+    assert recalled_ids == []
+    assert debug["recalled_bucket_ids"] == []
+    assert debug["injected_bucket_ids"] == []
+    assert debug["query_planner_debug"]["skip_reason"] == "domain_sentinel_skip"
+    assert debug["domain_sentinel_debug"]["should_recall"] is False
+    assert debug["domain_sentinel_debug"]["message_type"] == "troubleshooting"
+    assert debug["domain_sentinel_debug"]["primary_domain"] == "project"
+    assert debug["domain_sentinel_debug"]["called"] is True
+    assert debug["domain_sentinel_debug"]["skip_applied"] is True
+    assert captured[0]["json"]["model"] == "Qwen/Qwen3.5-4B"
+
+
 def test_gateway_hook_recall_skips_empty_cards(monkeypatch, test_config, bucket_mgr):
     _app, service, _transport, _captured = _build_service(
         monkeypatch,

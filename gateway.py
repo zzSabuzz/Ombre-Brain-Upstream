@@ -2263,6 +2263,7 @@ class GatewayService:
         injected_ids: list[str] | None = None
         query_planner_debug: dict[str, Any] = self._query_planner_debug_base(current_user_query)
         memory_sentinel_debug: dict[str, Any] = self._memory_sentinel_debug_base(current_user_query)
+        domain_sentinel_debug: dict[str, Any] = self._domain_sentinel_rule_plan(current_user_query)
         skip_broad_dynamic_recall = False
         date_persona_trace_requested = False
 
@@ -2287,13 +2288,28 @@ class GatewayService:
             sentinel_route = str(memory_sentinel_debug.get("route") or "")
             sentinel_skip_broad = sentinel_route in {"tone_only", "skip"}
             sentinel_search = sentinel_route == "search"
-            skip_broad_dynamic_recall = (
+            pre_domain_skip_broad = (
                 skip_for_targeted_detail
                 or needs_handoff_first
                 or just_now_context_requested
                 or date_recall_requested
                 or sentinel_skip_broad
                 or (low_signal_auto_recall and not sentinel_search)
+            )
+            domain_sentinel_skip_broad = False
+            if not pre_domain_skip_broad:
+                stage_started_at = time.perf_counter()
+                domain_sentinel_debug = await self._route_domain_sentinel(current_user_query)
+                mark_step("domain_sentinel", stage_started_at)
+                domain_sentinel_skip_broad = self._domain_sentinel_should_skip_recall(
+                    domain_sentinel_debug,
+                    current_user_query,
+                )
+            if domain_sentinel_skip_broad:
+                domain_sentinel_debug["skip_applied"] = True
+            skip_broad_dynamic_recall = (
+                pre_domain_skip_broad
+                or domain_sentinel_skip_broad
             )
             if needs_handoff_first:
                 query_planner_debug["skip_reason"] = handoff_skip_reason
@@ -2333,6 +2349,8 @@ class GatewayService:
                 mark_step("date_recall", stage_started_at)
             elif sentinel_skip_broad:
                 query_planner_debug["skip_reason"] = f"memory_sentinel_{sentinel_route}"
+            elif domain_sentinel_skip_broad:
+                query_planner_debug["skip_reason"] = "domain_sentinel_skip"
             elif low_signal_auto_recall:
                 query_planner_debug["skip_reason"] = "low_signal_auto_recall"
             if self.persona_engine.enabled and self._should_inject_interval(
@@ -2769,6 +2787,7 @@ class GatewayService:
                 suppressed_buckets=suppressed_buckets,
                 query_planner_debug=query_planner_debug,
                 memory_sentinel_debug=memory_sentinel_debug,
+                domain_sentinel_debug=domain_sentinel_debug,
             )
             mark_step("build_debug_payload", stage_started_at)
             prepare_timing_debug["total_ms"] = max(0, int((time.perf_counter() - prepare_started_at) * 1000))
@@ -11829,14 +11848,31 @@ class GatewayService:
         return {
             "enabled": bool(self.domain_sentinel_enabled),
             "source": "rules",
+            "called": False,
             "domains": domains[:4],
             "query": self._clip_text(planned_query, 220),
             "confidence": 0.55 if domains and domains != ["general"] else 0.35,
             "errors": [],
         }
 
+    def _domain_sentinel_query_explicitly_needs_memory(self, query: str) -> bool:
+        text = str(query or "").strip()
+        if not text:
+            return False
+        if self._extract_explicit_bucket_ids_from_text(text) or self._extract_explicit_moment_ids_from_text(text):
+            return True
+        if self._query_has_explicit_recall_marker(text):
+            return True
+        if self._query_requests_date_recall(text):
+            return True
+        if self._query_requests_direct_detail(text) or self.recall_policy.is_detail_read_query(text):
+            return True
+        return False
+
     async def _route_domain_sentinel(self, query: str) -> dict[str, Any]:
         debug = self._domain_sentinel_rule_plan(query)
+        if self._domain_sentinel_should_skip_recall(debug, query):
+            return debug
         if not self.domain_sentinel_enabled or not self.domain_sentinel_model:
             return debug
         if not self.domain_sentinel_base_url or not self.domain_sentinel_api_key:
@@ -11849,11 +11885,15 @@ class GatewayService:
                 {
                     "role": "system",
                     "content": (
-                        "Classify the user's latest message for memory recall scope. "
-                        "Return JSON only with keys: domains, query, confidence. "
-                        "domains must be chosen from relationship, intimacy, life, project, general. "
-                        "Use intimacy only for clearly intimate/body/desire content; otherwise use relationship for relationship anchors, signals, symbols, and communication. "
-                        "Do not output should_recall."
+                        "Classify the user's latest message for memory recall routing. "
+                        "Return JSON only with keys: message_type, primary_domain, domains, query, confidence, should_recall, reason. "
+                        "message_type must be one of: auto_trigger, troubleshooting, recall_request, ordinary_chat, other. "
+                        "primary_domain must be one of: relationship, intimacy, life, project, general. "
+                        "domains is optional but if present must use only those same domain keys. "
+                        "First decide whether the message is an automatic trigger/status payload or a troubleshooting/debugging message; if so set message_type accordingly and should_recall=false. "
+                        "For ordinary chat without a locatable memory need, set should_recall=false. "
+                        "For explicit recall, detail-read, date recall, or named-entity questions, set message_type=recall_request and should_recall=true. "
+                        "Use intimacy only for clearly intimate/body/desire content; otherwise use relationship for relationship anchors, signals, symbols, and communication."
                     ),
                 },
                 {"role": "user", "content": query},
@@ -11883,6 +11923,7 @@ class GatewayService:
             if parsed:
                 parsed["enabled"] = True
                 parsed["source"] = "llm"
+                parsed["called"] = True
                 parsed["errors"] = []
                 return parsed
             debug["errors"].append("domain_sentinel_empty_response")
@@ -11904,6 +11945,9 @@ class GatewayService:
         if not isinstance(raw, dict):
             return {}
         domains = []
+        primary_domain = normalize_domain_key(raw.get("primary_domain"))
+        if primary_domain and primary_domain in DOMAIN_SENTINEL_ALLOWED_DOMAINS:
+            domains.append(primary_domain)
         raw_domains = raw.get("domains") if isinstance(raw.get("domains"), list) else []
         for item in raw_domains:
             candidates = []
@@ -11920,11 +11964,65 @@ class GatewayService:
                     break
         if not domains:
             return {}
+        should_recall = self._parse_sentinel_bool(raw.get("should_recall"))
+        message_type = self._parse_domain_sentinel_message_type(raw.get("message_type"))
         return {
             "domains": domains[:4],
+            "primary_domain": domains[0],
             "query": self._clip_text(str(raw.get("query") or "").strip(), 220),
             "confidence": self._clamp(self._safe_float(raw.get("confidence"), 0.0)),
+            "should_recall": should_recall,
+            "recall_route": "skip" if should_recall is False else "search" if should_recall is True else "",
+            "message_type": message_type,
+            "reason": self._clip_text(str(raw.get("reason") or "").strip(), 160),
         }
+
+    @staticmethod
+    def _parse_sentinel_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"true", "yes", "y", "1", "search", "recall"}:
+            return True
+        if text in {"false", "no", "n", "0", "skip", "none", "no_recall"}:
+            return False
+        return None
+
+    @staticmethod
+    def _parse_domain_sentinel_message_type(value: Any) -> str:
+        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "automatic": "auto_trigger",
+            "auto": "auto_trigger",
+            "auto_status": "auto_trigger",
+            "system_status": "auto_trigger",
+            "debug": "troubleshooting",
+            "debugging": "troubleshooting",
+            "diagnostic": "troubleshooting",
+            "diagnostics": "troubleshooting",
+            "recall": "recall_request",
+            "memory_recall": "recall_request",
+            "chat": "ordinary_chat",
+            "ordinary": "ordinary_chat",
+        }
+        text = aliases.get(text, text)
+        if text in {"auto_trigger", "troubleshooting", "recall_request", "ordinary_chat", "other"}:
+            return text
+        return "other"
+
+    def _domain_sentinel_should_skip_recall(self, debug: dict[str, Any] | None, query: str = "") -> bool:
+        if not isinstance(debug, dict):
+            return False
+        if query and self._domain_sentinel_query_explicitly_needs_memory(query):
+            return False
+        if debug.get("should_recall") is not False:
+            return False
+        confidence = self._clamp(self._safe_float(debug.get("confidence"), 0.0))
+        if confidence < 0.55:
+            return False
+        if str(debug.get("recall_route") or "").strip().lower() in {"search", "recall"}:
+            return False
+        return True
 
     @staticmethod
     def _is_sentinel_rejected_domain(value: Any) -> bool:
@@ -15465,6 +15563,7 @@ class GatewayService:
         suppressed_buckets: list[dict] | None = None,
         query_planner_debug: dict[str, Any] | None = None,
         memory_sentinel_debug: dict[str, Any] | None = None,
+        domain_sentinel_debug: dict[str, Any] | None = None,
         date_persona_trace: str = "",
         date_persona_trace_debug: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -15607,6 +15706,7 @@ class GatewayService:
             "active_reminder_ids": active_reminder_ids,
             "query_planner_debug": query_planner_debug or self._query_planner_debug_base(query),
             "memory_sentinel_debug": memory_sentinel_debug or self._memory_sentinel_debug_base(query),
+            "domain_sentinel_debug": domain_sentinel_debug or self._domain_sentinel_rule_plan(query),
             "memory_detail_recall_debug": self._memory_detail_recall_debug_base(injected_bucket_ids),
             "targeted_memory_detail_debug": targeted_memory_detail_debug
             or self._targeted_memory_detail_debug_base(),
@@ -15674,6 +15774,29 @@ class GatewayService:
 
         all_buckets = await self._list_gateway_buckets(include_archive=False)
         domain_query = str(domain_sentinel_debug.get("query") or "").strip()
+        if self._domain_sentinel_should_skip_recall(domain_sentinel_debug, query):
+            domain_sentinel_debug["skip_applied"] = True
+            query_planner_debug["skip_reason"] = "domain_sentinel_skip"
+            return [], [], {
+                "query_preview": self._clip_text(query, 500),
+                "domain_sentinel_debug": domain_sentinel_debug,
+                "query_planner_debug": query_planner_debug,
+                "memory_sentinel_debug": memory_sentinel_debug,
+                "recalled_bucket_ids": [],
+                "recalled_bucket_debug": [],
+                "recalled_moment_ids": [],
+                "diffused_bucket_ids": [],
+                "diffused_moment_ids": [],
+                "recalled_moment_debug": [],
+                "diffused_moment_debug": [],
+                "suppressed_bucket_candidates": [],
+                "hook_recall_debug": {
+                    "mode": "fast_bucket",
+                    "skip_reason": "domain_sentinel_skip",
+                    "domain_query": domain_query,
+                    "candidate_count": 0,
+                },
+            }
         search_query = self._dynamic_recall_search_query(domain_query or query, memory_sentinel_debug)
         selected_buckets, suppressed_buckets, query_planner_debug = await self._select_dynamic_buckets(
             query,
