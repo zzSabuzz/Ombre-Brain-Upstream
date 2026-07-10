@@ -470,6 +470,7 @@ class GatewayService:
         self._moment_graph_cache_value: tuple[list[dict], dict[str, list[dict]], list[dict]] | None = None
         self._moment_graph_cache_bucket_list_id = 0
         self._moment_graph_cache_edge_stamp: tuple[int, int] = (0, 0)
+        self._moment_graph_cache_store_stamp: tuple[int, int] = (0, 0)
         self.relevance_options = memory_relevance_options_from_config(config)
         self.axis_lite_cfg = (
             self.gateway_cfg.get("axis_lite", {})
@@ -816,6 +817,14 @@ class GatewayService:
     async def close(self) -> None:
         if self.http_client and not getattr(self.http_client, "is_closed", False):
             await self.http_client.aclose()
+
+    def warm_recall_runtime(self) -> None:
+        started_at = time.perf_counter()
+        self._recall_query_plan("记忆检索预热")
+        logger.info(
+            "Gateway recall runtime warmed | latency_ms=%s",
+            max(0, int((time.perf_counter() - started_at) * 1000)),
+        )
 
     async def health_payload(self) -> dict:
         stats = await self.bucket_mgr.get_stats()
@@ -1811,6 +1820,11 @@ class GatewayService:
                 session_id,
                 include_favorite_memory=include_favorite_memory,
                 include_debug=True,
+                debug_detail=(
+                    "full"
+                    if str(request.headers.get("X-Ombre-Debug-Detail") or "").strip().lower() == "full"
+                    else "compact"
+                ),
             )
         except ValueError as exc:
             return JSONResponse(
@@ -1947,6 +1961,11 @@ class GatewayService:
                 session_id,
                 include_favorite_memory=include_favorite_memory,
                 include_debug=True,
+                debug_detail=(
+                    "full"
+                    if str(request.headers.get("X-Ombre-Debug-Detail") or "").strip().lower() == "full"
+                    else "compact"
+                ),
             )
         except ValueError as exc:
             return self._anthropic_error(str(exc), status_code=400)
@@ -2311,12 +2330,46 @@ class GatewayService:
         sections = [section for section in RECALL_EVAL_BLOCKED_SECTIONS if section in text]
         injected_bucket_ids = list((debug or {}).get("injected_bucket_ids") or [])
         recalled_bucket_ids = list((debug or {}).get("recalled_bucket_ids") or [])
+        required_bucket_ids = [
+            str(item)
+            for item in (case.get("include_ids") or case.get("expected_ids") or [])
+            if str(item or "").strip()
+        ]
+        excluded_bucket_ids = [
+            str(item)
+            for item in (case.get("exclude_ids") or [])
+            if str(item or "").strip()
+        ]
         failure_reasons: list[str] = []
         if expect == "none":
             if injected_bucket_ids:
                 failure_reasons.append("injected_bucket_ids_not_empty")
             if sections:
                 failure_reasons.append("blocked_sections_present")
+        elif expect in {"some", "any", "ids"}:
+            if not injected_bucket_ids:
+                failure_reasons.append("injected_bucket_ids_empty")
+        else:
+            failure_reasons.append(f"unsupported_expectation:{expect}")
+
+        missing_required_ids = [
+            bucket_id for bucket_id in required_bucket_ids if bucket_id not in injected_bucket_ids
+        ]
+        if missing_required_ids:
+            failure_reasons.append("required_bucket_ids_missing")
+        unexpected_excluded_ids = [
+            bucket_id for bucket_id in excluded_bucket_ids if bucket_id in injected_bucket_ids
+        ]
+        if unexpected_excluded_ids:
+            failure_reasons.append("excluded_bucket_ids_injected")
+
+        max_elapsed_ms = case.get("max_elapsed_ms")
+        if max_elapsed_ms is not None:
+            try:
+                if elapsed_ms > max(0, int(max_elapsed_ms)):
+                    failure_reasons.append("elapsed_ms_exceeded")
+            except (TypeError, ValueError):
+                failure_reasons.append("invalid_max_elapsed_ms")
 
         result: dict[str, Any] = {
             "id": case_id,
@@ -2328,6 +2381,11 @@ class GatewayService:
             "recalled_ids": list(recalled_ids or []),
             "injected_bucket_ids": injected_bucket_ids,
             "recalled_bucket_ids": recalled_bucket_ids,
+            "required_bucket_ids": required_bucket_ids,
+            "missing_required_bucket_ids": missing_required_ids,
+            "excluded_bucket_ids": excluded_bucket_ids,
+            "unexpected_excluded_bucket_ids": unexpected_excluded_ids,
+            "max_elapsed_ms": max_elapsed_ms,
             "sections": sections,
             "memory_sentinel": (debug or {}).get("memory_sentinel_debug") or {},
             "query_planner": (debug or {}).get("query_planner_debug") or {},
@@ -2387,6 +2445,7 @@ class GatewayService:
         self._moment_graph_cache_value = None
         self._moment_graph_cache_bucket_list_id = 0
         self._moment_graph_cache_edge_stamp = (0, 0)
+        self._moment_graph_cache_store_stamp = (0, 0)
 
     async def prepare_payload(
         self,
@@ -2395,6 +2454,7 @@ class GatewayService:
         *,
         include_favorite_memory: bool = False,
         include_debug: bool = False,
+        debug_detail: str = "full",
     ) -> tuple[dict, list[str] | None] | tuple[dict, list[str] | None, dict[str, Any]]:
         prepare_started_at = time.perf_counter()
         prepare_steps_ms: dict[str, int] = {}
@@ -2885,6 +2945,7 @@ class GatewayService:
                     ]
                     + shown_date_recall_bucket_ids
                     + shown_favorite_ids
+                    + current_diffused_bucket_ids
                     + shown_targeted_detail_bucket_ids
                     + shown_dream_source_bucket_ids
                 )
@@ -3041,6 +3102,7 @@ class GatewayService:
                 query_planner_debug=query_planner_debug,
                 memory_sentinel_debug=memory_sentinel_debug,
                 domain_sentinel_debug=domain_sentinel_debug,
+                debug_detail=debug_detail,
             )
             mark_step("build_debug_payload", stage_started_at)
             prepare_timing_debug["total_ms"] = max(0, int((time.perf_counter() - prepare_started_at) * 1000))
@@ -8201,35 +8263,66 @@ class GatewayService:
         self._prune_self_anchor_moment_index(all_buckets)
         bucket_list_id = id(all_buckets)
         edge_stamp = self._memory_edge_store_stamp()
+        store_stamp = self._memory_moment_store_stamp()
         if (
             self._moment_graph_cache_value is not None
             and bucket_list_id == self._moment_graph_cache_bucket_list_id
             and edge_stamp == self._moment_graph_cache_edge_stamp
+            and store_stamp == self._moment_graph_cache_store_stamp
         ):
             return self._moment_graph_cache_value
         recallable_buckets = [bucket for bucket in all_buckets if not self._is_self_anchor_recall_excluded_bucket(bucket)]
+        recallable_bucket_ids = {
+            str(bucket.get("id") or "")
+            for bucket in recallable_buckets
+            if str(bucket.get("id") or "")
+        }
         bucket_edges = self.memory_edge_store.list_edges()
         signature = self._moment_graph_signature(recallable_buckets, bucket_edges)
         if (
             signature
             and signature == self._moment_graph_cache_signature
             and self._moment_graph_cache_value is not None
+            and store_stamp == self._moment_graph_cache_store_stamp
         ):
             return self._moment_graph_cache_value
         self.memory_moment_store.bulk_upsert(recallable_buckets)
-        moments = self._recallable_moments(self.memory_moment_store.list_all())
+        moments = [
+            moment
+            for moment in self._recallable_moments(self.memory_moment_store.list_all())
+            if str(moment.get("bucket_id") or "") in recallable_bucket_ids
+        ]
         grouped = self._moments_by_bucket(moments)
-        edges = self.memory_moment_store.list_edges()
+        moment_ids = {
+            str(moment.get("moment_id") or "")
+            for moment in moments
+            if str(moment.get("moment_id") or "")
+        }
+        edges = [
+            edge
+            for edge in self.memory_moment_store.list_edges()
+            if str(edge.get("source") or "") in moment_ids
+            and str(edge.get("target") or "") in moment_ids
+        ]
         edges.extend(self._bucket_edges_as_moment_edges(bucket_edges, grouped))
         value = (moments, grouped, edges)
         self._moment_graph_cache_signature = signature
         self._moment_graph_cache_value = value
         self._moment_graph_cache_bucket_list_id = bucket_list_id
         self._moment_graph_cache_edge_stamp = edge_stamp
+        self._moment_graph_cache_store_stamp = self._memory_moment_store_stamp()
         return value
 
     def _memory_edge_store_stamp(self) -> tuple[int, int]:
         path = str(getattr(self.memory_edge_store, "path", "") or "")
+        return self._path_stamp(path)
+
+    def _memory_moment_store_stamp(self) -> tuple[int, int]:
+        path = str(getattr(self.memory_moment_store, "db_path", "") or "")
+        return self._path_stamp(path)
+
+    @staticmethod
+    def _path_stamp(path: str) -> tuple[int, int]:
         if not path:
             return (0, 0)
         try:
@@ -12509,6 +12602,10 @@ class GatewayService:
             return True
         if self._query_requests_direct_detail(text) or self.recall_policy.is_detail_read_query(text):
             return True
+        if self.recall_policy.has_axis_relation_marker(text) and self._locatable_query_terms(text):
+            return True
+        if re.search(r"[A-Za-z]+[A-Za-z0-9_.:-]*\d", text):
+            return True
         return False
 
     def _resolve_domain_sentinel_model(self, configured_model: Any = None) -> str:
@@ -12563,6 +12660,16 @@ class GatewayService:
 
     async def _route_domain_sentinel(self, query: str) -> dict[str, Any]:
         debug = self._domain_sentinel_rule_plan(query)
+        if self._domain_sentinel_query_explicitly_needs_memory(query):
+            debug.update(
+                source="rules",
+                called=False,
+                message_type="recall_request",
+                should_recall=True,
+                recall_route="search",
+                reason="explicit_memory_need",
+            )
+            return debug
         if self._domain_sentinel_should_skip_recall(debug, query):
             return debug
         if not self.domain_sentinel_enabled or not self.domain_sentinel_model:
@@ -16149,6 +16256,7 @@ class GatewayService:
         decision = self.recall_policy.assess(
             query,
             self._bucket_relevance_node(bucket),
+            query_plan=query_plan,
             has_topic_evidence=self._bucket_has_query_topic_evidence(query, bucket),
             semantic_score=item.get("semantic_score"),
             rerank_score=item.get("rerank_score"),
@@ -16334,6 +16442,7 @@ class GatewayService:
         decision = self.recall_policy.assess(
             query,
             moment,
+            query_plan=query_plan,
             has_topic_evidence=self._moment_has_query_topic_evidence(query, moment),
             semantic_score=moment.get("semantic_score"),
             rerank_score=moment.get("rerank_score"),
@@ -17940,6 +18049,91 @@ class GatewayService:
             "suppressed": suppressed,
         }
 
+    def _compact_suppressed_bucket_debug(self, item: dict) -> dict[str, Any]:
+        bucket = item.get("bucket") if isinstance(item, dict) else {}
+        if not isinstance(bucket, dict):
+            bucket = {}
+        metadata = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+        return {
+            "bucket_id": str(bucket.get("id") or ""),
+            "bucket_name": str(metadata.get("name") or bucket.get("id") or ""),
+            "admission_reason": str(item.get("admission_reason") or "suppressed"),
+            "blocked_reason": str(item.get("blocked_reason") or ""),
+            "evidence_labels": list(item.get("evidence_labels") or []),
+            "hard_evidence_labels": list(item.get("hard_evidence_labels") or []),
+            "score": self._safe_float(item.get("score"), 0.0),
+            "semantic_score": self._safe_float(item.get("semantic_score"), 0.0),
+            "keyword_score": self._safe_float(item.get("keyword_score"), 0.0),
+            "rerank_score": (
+                self._safe_float(item.get("rerank_score"), 0.0)
+                if item.get("rerank_score") is not None
+                else None
+            ),
+        }
+
+    def _compact_suppressed_moment_debug(self, moment: dict) -> dict[str, Any]:
+        return {
+            "bucket_id": str(moment.get("bucket_id") or ""),
+            "bucket_name": self._moment_bucket_title(moment),
+            "moment_id": str(moment.get("moment_id") or ""),
+            "section": str(moment.get("section") or ""),
+            "admission_reason": str(
+                moment.get("admission_reason") or moment.get("_admission_reason") or "suppressed"
+            ),
+            "score": self._safe_float(moment.get("score"), 0.0),
+            "semantic_score": (
+                self._safe_float(moment.get("semantic_score"), 0.0)
+                if moment.get("semantic_score") is not None
+                else None
+            ),
+            "rerank_score": (
+                self._safe_float(moment.get("rerank_score"), 0.0)
+                if moment.get("rerank_score") is not None
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _compact_structural_activation_debug(
+        query_planner_debug: dict[str, Any] | None,
+        injected_bucket_ids: list[str],
+    ) -> dict[str, Any]:
+        planner = query_planner_debug if isinstance(query_planner_debug, dict) else {}
+        raw = planner.get("structural_activation_debug")
+        trace = raw if isinstance(raw, dict) else {}
+        memory_edges = trace.get("memory_edges")
+        if not isinstance(memory_edges, dict):
+            memory_edges = {}
+        activated_ids = [str(item) for item in trace.get("activated_bucket_ids", []) or [] if str(item)]
+        admitted_ids = [str(item) for item in trace.get("admitted_bucket_ids", []) or [] if str(item)]
+        admitted_set = set(admitted_ids)
+        injected_ids = [str(item) for item in injected_bucket_ids or [] if str(item)]
+        structural_injected = [item for item in injected_ids if item in admitted_set]
+        return {
+            "version": int(trace.get("version") or 1),
+            "enabled": bool(trace.get("enabled")),
+            "mode": str(trace.get("mode") or "shadow"),
+            "engine": str(trace.get("engine") or "word_map_v1"),
+            "status": str(trace.get("status") or "compact"),
+            "activated_bucket_ids": activated_ids,
+            "admitted_bucket_ids": admitted_ids,
+            "blocked_bucket_ids": [
+                str(item) for item in trace.get("blocked_bucket_ids", []) or [] if str(item)
+            ],
+            "memory_edges": {
+                "enabled": bool(memory_edges.get("enabled")),
+                "status": "skipped",
+                "reason": "compact_debug",
+            },
+            "final": {
+                "structural_candidate_bucket_ids": activated_ids,
+                "selected_bucket_ids": admitted_ids,
+                "structural_injected_bucket_ids": structural_injected,
+                "existing_injected_bucket_ids": [item for item in injected_ids if item not in admitted_set],
+                "reason": "injected" if structural_injected else "compact_debug",
+            },
+        }
+
     def _build_injection_debug_payload(
         self,
         *,
@@ -17976,7 +18170,9 @@ class GatewayService:
         domain_sentinel_debug: dict[str, Any] | None = None,
         date_persona_trace: str = "",
         date_persona_trace_debug: dict[str, Any] | None = None,
+        debug_detail: str = "full",
     ) -> dict[str, Any]:
+        compact_debug = str(debug_detail or "full").strip().lower() == "compact"
         recalled_moment_ids = [
             str(moment.get("moment_id") or "")
             for moment in recalled_moments
@@ -18052,37 +18248,51 @@ class GatewayService:
             self._format_moment_debug(
                 moment,
                 explicit_lookup=explicit_lookup,
-                include_text=True,
+                include_text=not compact_debug,
                 query=query,
-                direct_render=self._direct_bucket_render_debug(
-                    bucket_map.get(str(moment.get("bucket_id") or "")),
-                    moment,
-                    self.recalled_budget,
-                    query_text=query,
+                direct_render=(
+                    None
+                    if compact_debug
+                    else self._direct_bucket_render_debug(
+                        bucket_map.get(str(moment.get("bucket_id") or "")),
+                        moment,
+                        self.recalled_budget,
+                        query_text=query,
+                    )
                 ),
                 status="injected_direct",
             )
             for moment in recalled_moments[:20]
         ]
         diffused_moment_debug_rows = diffused_debug_rows[:20]
-        suppressed_bucket_debug_rows = [
-            self._format_suppressed_bucket_debug(
-                item,
-                explicit_lookup=explicit_lookup,
-                query=query,
-            )
-            for item in (suppressed_buckets or [])[:20]
-        ]
-        suppressed_moment_debug_rows = [
-            self._format_moment_debug(
-                moment,
-                explicit_lookup=explicit_lookup,
-                include_text=True,
-                query=query,
-                status="suppressed",
-            )
-            for moment in (suppressed_moments or [])[:20]
-        ]
+        if compact_debug:
+            suppressed_bucket_debug_rows = [
+                self._compact_suppressed_bucket_debug(item)
+                for item in (suppressed_buckets or [])[:8]
+            ]
+            suppressed_moment_debug_rows = [
+                self._compact_suppressed_moment_debug(moment)
+                for moment in (suppressed_moments or [])[:8]
+            ]
+        else:
+            suppressed_bucket_debug_rows = [
+                self._format_suppressed_bucket_debug(
+                    item,
+                    explicit_lookup=explicit_lookup,
+                    query=query,
+                )
+                for item in (suppressed_buckets or [])[:20]
+            ]
+            suppressed_moment_debug_rows = [
+                self._format_moment_debug(
+                    moment,
+                    explicit_lookup=explicit_lookup,
+                    include_text=True,
+                    query=query,
+                    status="suppressed",
+                )
+                for moment in (suppressed_moments or [])[:20]
+            ]
         moment_chunk_shadow_bucket_ids = list(
             dict.fromkeys(
                 recalled_bucket_ids
@@ -18094,9 +18304,18 @@ class GatewayService:
                 + diffused_candidate_bucket_ids
             )
         )
-        moment_chunk_shadow_debug = self._moment_chunk_shadow_debug(
-            bucket_map,
-            moment_chunk_shadow_bucket_ids,
+        moment_chunk_shadow_debug = (
+            {
+                "enabled": False,
+                "status": "skipped",
+                "reason": "compact_debug",
+                "bucket_ids": moment_chunk_shadow_bucket_ids,
+            }
+            if compact_debug
+            else self._moment_chunk_shadow_debug(
+                bucket_map,
+                moment_chunk_shadow_bucket_ids,
+            )
         )
         recall_why_summary = self._build_recall_why_summary(
             injected_bucket_ids=injected_bucket_ids,
@@ -18109,20 +18328,27 @@ class GatewayService:
             targeted_bucket_ids=targeted_bucket_ids,
             dream_source_bucket_ids=dream_source_bucket_ids,
         )
-        structural_activation_debug = self._finalize_structural_activation_debug(
-            query_planner_debug,
-            injected_bucket_ids,
-        )
-        if not structural_activation_debug:
-            structural_activation_debug = self._structural_activation_debug_base(query)
-        structural_activation_debug["memory_edges"] = self._memory_edge_activation_debug(
-            query,
-            recalled_moments,
-            diffused_debug_rows,
-            context_mode=context_mode,
-        )
+        if compact_debug:
+            structural_activation_debug = self._compact_structural_activation_debug(
+                query_planner_debug,
+                injected_bucket_ids,
+            )
+        else:
+            structural_activation_debug = self._finalize_structural_activation_debug(
+                query_planner_debug,
+                injected_bucket_ids,
+            )
+            if not structural_activation_debug:
+                structural_activation_debug = self._structural_activation_debug_base(query)
+            structural_activation_debug["memory_edges"] = self._memory_edge_activation_debug(
+                query,
+                recalled_moments,
+                diffused_debug_rows,
+                context_mode=context_mode,
+            )
         return {
             "model": model,
+            "debug_detail": "compact" if compact_debug else "full",
             "query_preview": self._clip_text(query, 500),
             "stable_tokens": count_tokens_approx(stable_context),
             "dynamic_tokens": count_tokens_approx(dynamic_context),
@@ -20042,6 +20268,7 @@ def create_gateway_app(
     @asynccontextmanager
     async def lifespan(app: Starlette):
         app.state.gateway_service = service
+        service.warm_recall_runtime()
         yield
         await service.close()
 

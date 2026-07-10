@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import product
 from typing import Any
 
@@ -964,6 +965,8 @@ class RecallQueryPlan:
     activated_axis_terms: tuple[str, ...]
     activated_axis_groups: tuple[tuple[str, ...], ...]
     activated_axis_multi: bool
+    auto_too_vague: bool
+    short_taste_terms: tuple[str, ...]
     long_term_route: str
     skip_long_term_recall: bool
     skip_reason: str
@@ -1327,6 +1330,7 @@ class RecallPolicy:
     def should_enforce_topic_evidence(self, query: str, *, allow_body_chain: bool = False) -> bool:
         return self.requires_topic_evidence(query) and not allow_body_chain
 
+    @lru_cache(maxsize=512)
     def plan_query(self, query: str, *, context_mode: str = "") -> RecallQueryPlan:
         text = str(query or "").strip()
         wants_body_chain = query_has_facet(text, "embodiment", self.options)
@@ -1354,6 +1358,8 @@ class RecallPolicy:
             activated_axis_terms=axis_terms,
             activated_axis_groups=axis_groups,
             activated_axis_multi=axis_multi,
+            auto_too_vague=self.is_auto_query_too_vague(text),
+            short_taste_terms=tuple(self._short_taste_query_terms(text)),
             long_term_route="skip" if skip_long_term_recall else "search",
             skip_long_term_recall=skip_long_term_recall,
             skip_reason=skip_reason,
@@ -2691,6 +2697,7 @@ class RecallPolicy:
         query: str,
         node: dict,
         *,
+        query_plan: RecallQueryPlan | None = None,
         has_topic_evidence: bool | None = None,
         semantic_score: float | None = None,
         rerank_score: float | None = None,
@@ -2698,14 +2705,15 @@ class RecallPolicy:
         context_only: bool = False,
         auto: bool = False,
     ) -> RecallPolicyDecision:
+        query_plan = query_plan or self.plan_query(query)
         if has_topic_evidence is None:
             has_topic_evidence = self.node_has_topic_evidence(query, node)
-        auto_too_vague = self.is_auto_query_too_vague(query) if auto else False
+        auto_too_vague = query_plan.auto_too_vague if auto else False
         debug = {
-            "requires_topic_evidence": self.requires_topic_evidence(query),
+            "requires_topic_evidence": query_plan.requires_topic_evidence,
             "has_topic_evidence": bool(has_topic_evidence),
-            "specific_query_terms": self.specific_query_terms(query),
-            "short_taste_query_terms": self._short_taste_query_terms(query),
+            "specific_query_terms": list(query_plan.specific_terms),
+            "short_taste_query_terms": list(query_plan.short_taste_terms),
             "semantic_score": _maybe_float(semantic_score),
             "rerank_score": _maybe_float(rerank_score),
             "high_confidence_edge": bool(high_confidence_edge),

@@ -5200,14 +5200,21 @@ def _recall_admission_thresholds() -> tuple[float, float]:
     )
 
 
+_RECALL_POLICY_INSTANCE: RecallPolicy | None = None
+
+
 def _recall_policy() -> RecallPolicy:
+    global _RECALL_POLICY_INSTANCE
+    if _RECALL_POLICY_INSTANCE is not None:
+        return _RECALL_POLICY_INSTANCE
     semantic_threshold, rerank_threshold = _recall_admission_thresholds()
-    return RecallPolicy(
+    _RECALL_POLICY_INSTANCE = RecallPolicy(
         _recall_relevance_options(),
         semantic_threshold=semantic_threshold,
         rerank_threshold=rerank_threshold,
         ai_reaction_names=[identity_names(config).get("ai_name")],
     )
+    return _RECALL_POLICY_INSTANCE
 
 
 def _recall_query_plan(query: str, *, context_mode: str = ""):
@@ -5911,8 +5918,9 @@ async def _build_recall_debug_payload(
     except Exception as e:
         warnings.append(f"vector_search_failed: {e}")
 
+    explicit_lookup = _query_explicitly_requests_archive_memory(query)
     try:
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        all_buckets = await bucket_mgr.list_all(include_archive=explicit_lookup)
     except Exception as e:
         warnings.append(f"list_buckets_failed: {e}")
         all_buckets = matches
@@ -5928,15 +5936,15 @@ async def _build_recall_debug_payload(
     if lexical_terms:
         recall_thresholds["lexical_terms"] = lexical_terms
 
-    await _refresh_moment_graph(all_buckets)
+    active_moments, _, _ = await _refresh_moment_graph(all_buckets)
     bucket_boosts = seed_scores_for_buckets(matches)
-    searched_candidates = memory_moment_store.search_moments(
+    searched_candidates = memory_moment_store.search_moment_items(
         search_query,
+        active_moments,
         limit=max(max_candidates, max_results, 20),
         bucket_boosts=bucket_boosts,
         exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
     )
-    explicit_lookup = _query_explicitly_requests_archive_memory(query)
     direct_candidates = _direct_recallable_moments(searched_candidates, explicit_lookup=explicit_lookup)
     source_record_moments = _source_record_synthetic_moments_for_matches(matches, query)
     direct_candidates = _prepend_source_record_synthetic_moments(
@@ -6247,10 +6255,29 @@ async def _refresh_moment_graph(all_buckets: list[dict] | None = None) -> tuple[
         all_buckets = await bucket_mgr.list_all(include_archive=False)
     _prune_self_anchor_moment_index(all_buckets)
     recallable_buckets = [bucket for bucket in all_buckets if not _is_self_anchor_recall_excluded_bucket(bucket)]
+    recallable_bucket_ids = {
+        str(bucket.get("id") or "")
+        for bucket in recallable_buckets
+        if str(bucket.get("id") or "")
+    }
     memory_moment_store.bulk_upsert(recallable_buckets)
-    moments = _recallable_moments(memory_moment_store.list_all())
+    moments = [
+        moment
+        for moment in _recallable_moments(memory_moment_store.list_all())
+        if str(moment.get("bucket_id") or "") in recallable_bucket_ids
+    ]
     grouped = _moments_by_bucket(moments)
-    edges = memory_moment_store.list_edges()
+    moment_ids = {
+        str(moment.get("moment_id") or "")
+        for moment in moments
+        if str(moment.get("moment_id") or "")
+    }
+    edges = [
+        edge
+        for edge in memory_moment_store.list_edges()
+        if str(edge.get("source") or "") in moment_ids
+        and str(edge.get("target") or "") in moment_ids
+    ]
     edges.extend(_bucket_edges_as_moment_edges(memory_edge_store.list_edges(), grouped))
     return moments, grouped, edges
 
@@ -7242,8 +7269,9 @@ async def breath(
     except Exception as e:
         logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
 
+    explicit_lookup = _query_explicitly_requests_archive_memory(query)
     try:
-        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        all_buckets = await bucket_mgr.list_all(include_archive=explicit_lookup)
     except Exception as e:
         logger.warning(f"Failed to list buckets for moment recall / moment 召回列桶失败: {e}")
         all_buckets = matches
@@ -7396,7 +7424,7 @@ async def breath(
         for bucket in all_buckets
         if bucket.get("id") and not is_self_anchor_bucket(bucket)
     }
-    _, grouped_moments, _ = await _refresh_moment_graph(all_buckets)
+    active_moments, grouped_moments, _ = await _refresh_moment_graph(all_buckets)
     bucket_boosts = seed_scores_for_buckets(matches)
     if word_map_hint_bucket_ids:
         moment_boost = float(_word_map_hint_settings()["moment_boost"])
@@ -7406,13 +7434,13 @@ async def breath(
             if sources and len(sources - {"word_map"}) > 0:
                 continue
             bucket_boosts[bucket_id] = max(0.0, min(1.0, float(hint_score) * moment_boost))
-    moment_candidates = memory_moment_store.search_moments(
+    moment_candidates = memory_moment_store.search_moment_items(
         search_query,
+        active_moments,
         limit=max(max_results, 20),
         bucket_boosts=bucket_boosts,
         exclude_sections=TASK_ONLY_MOMENT_SECTIONS,
     )
-    explicit_lookup = _query_explicitly_requests_archive_memory(query)
     moment_candidates = _direct_recallable_moments(moment_candidates, explicit_lookup=explicit_lookup)
     source_record_moments = _source_record_synthetic_moments_for_matches(matches, query)
     moment_candidates = _prepend_source_record_synthetic_moments(
@@ -12886,6 +12914,12 @@ async def api_import_review(request):
 if __name__ == "__main__":
     transport = config.get("transport", "stdio")
     logger.info(f"Ombre Brain starting | transport: {transport}")
+    recall_warm_started_at = time.perf_counter()
+    _recall_query_plan("记忆检索预热")
+    logger.info(
+        "Recall runtime warmed / 召回运行时已预热: %sms",
+        max(0, int((time.perf_counter() - recall_warm_started_at) * 1000)),
+    )
 
     if transport in ("sse", "streamable-http"):
         import threading
