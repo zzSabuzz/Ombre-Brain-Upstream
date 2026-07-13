@@ -1374,10 +1374,16 @@ class RecallPolicy:
         query: str,
         locatable_terms: tuple[str, ...],
     ) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], bool]:
+        placeholder_query = self._axis_term_is_placeholder(query)
         terms = [
             str(term or "").strip()
             for term in locatable_terms
-            if str(term or "").strip() and self._compact_entity_keyword(term)
+            if (
+                str(term or "").strip()
+                and self._compact_entity_keyword(term)
+                and not self._axis_term_is_placeholder(term)
+                and not (placeholder_query and self._axis_term_is_placeholder_meta(term))
+            )
         ]
         if not terms:
             return (), (), False
@@ -2213,6 +2219,15 @@ class RecallPolicy:
     @staticmethod
     def _compact_entity_keyword(value: object) -> str:
         return re.sub(r"[^0-9a-z\u4e00-\u9fff_.:-]+", "", str(value or "").strip().lower())
+
+    @classmethod
+    def _axis_term_is_placeholder(cls, value: object) -> bool:
+        compact = cls._compact_entity_keyword(value)
+        return bool(re.search(r"(?<![a-z0-9])x{2,}(?![a-z0-9])", compact, flags=re.IGNORECASE))
+
+    @classmethod
+    def _axis_term_is_placeholder_meta(cls, value: object) -> bool:
+        return cls._compact_entity_keyword(value) in {"填空", "填空题", "补全", "答案"}
 
     def _entity_keyword_allowed(self, value: str, *, strong: bool = False) -> bool:
         compact = self._compact_entity_keyword(value)
