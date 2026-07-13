@@ -15698,6 +15698,18 @@ class GatewayService:
                 continue
             if key in title_key and term not in output:
                 output.append(term)
+        query_key = self._compact_lookup_key(query)
+        title = str(meta.get("name") or bucket.get("name") or "").strip()
+        for fragment in re.split(r"[与和及、/|：:—-]+", title):
+            cleaned = fragment.strip()
+            key = self._compact_lookup_key(cleaned)
+            if (
+                len(key) >= 4
+                and key in query_key
+                and not self._dynamic_anchor_term_is_category(cleaned)
+                and cleaned not in output
+            ):
+                output.append(cleaned)
         return output
 
     @staticmethod
@@ -16419,6 +16431,7 @@ class GatewayService:
                 or self._word_map_direct_signal(item)
                 or self._entity_edge_direct_signal(item)
                 or item.get("semantic_rescue_direct_span")
+                or "title_anchor" in hard_evidence_labels
             ),
             auto=True,
         )

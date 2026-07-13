@@ -2758,7 +2758,7 @@ class RecallPolicy:
             "auto_too_vague": bool(auto_too_vague),
         }
 
-        if auto_too_vague:
+        if auto_too_vague and not high_confidence_edge:
             return RecallPolicyDecision(
                 admit_direct=False,
                 admit_diffused=False,
