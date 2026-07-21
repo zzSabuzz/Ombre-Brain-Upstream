@@ -114,6 +114,10 @@ class DecayEngine:
         if metadata.get("pinned") or metadata.get("protected"):
             return 999.0
 
+        # --- Isolated durable stores never decay ---
+        if metadata.get("type") in ("plan", "letter", "i"):
+            return 50.0
+
         # --- Permanent buckets never decay ---
         if metadata.get("type") == "permanent":
             return 999.0
@@ -208,7 +212,7 @@ class DecayEngine:
 
             # Skip permanent / pinned / protected / feel buckets
             # 跳过固化桶、钉选/保护桶和 feel 桶
-            if meta.get("type") in ("permanent", "feel") or meta.get("pinned") or meta.get("protected"):
+            if meta.get("type") in ("permanent", "feel", "plan", "letter", "i") or meta.get("pinned") or meta.get("protected"):
                 continue
 
             checked += 1
