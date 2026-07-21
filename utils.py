@@ -147,6 +147,14 @@ def load_config(config_path: str = None) -> dict:
         "write_path": {
             "semantic_search_timeout_seconds": 3,
         },
+        "plan": {
+            "auto_resolution": {
+                "enabled": False,
+                "vector_threshold": 0.70,
+                "confidence_threshold": 0.70,
+                "top_k": 8,
+            },
+        },
         "memory_write_gate": {
             "enabled": True,
             "auto_sources": ["operit", "workflow", "worker", "auto"],
@@ -594,6 +602,12 @@ def load_config(config_path: str = None) -> dict:
     env_embedding_query_instruction = os.environ.get("OMBRE_EMBEDDING_QUERY_INSTRUCTION", "")
     if env_embedding_query_instruction:
         config.setdefault("embedding", {})["query_instruction"] = env_embedding_query_instruction
+
+    env_plan_auto_resolution = os.environ.get("OMBRE_PLAN_AUTO_RESOLUTION_ENABLED", "")
+    if env_plan_auto_resolution:
+        config.setdefault("plan", {}).setdefault("auto_resolution", {})["enabled"] = (
+            env_plan_auto_resolution.lower() in ("1", "true", "yes", "on")
+        )
 
     env_reranker_api_key = os.environ.get("OMBRE_RERANKER_API_KEY", "")
     if env_reranker_api_key:
