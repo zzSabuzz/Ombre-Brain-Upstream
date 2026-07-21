@@ -47,11 +47,12 @@ import logging
 import asyncio
 import hashlib
 import hmac
+import html
 import json as _json_lib
 import re
 import secrets
 import time
-from base64 import b64decode
+from base64 import b64decode, urlsafe_b64encode
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -577,6 +578,14 @@ DEFAULT_CHATGPT_OAUTH_REDIRECT_PREFIX = "https://chatgpt.com/connector/oauth/"
 DEFAULT_CLAUDE_OAUTH_REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"
 
 
+def _oauth_clients_file() -> str:
+    state_dir = config.get("state_dir") or os.path.join(
+        os.path.dirname(os.path.abspath(config.get("buckets_dir", "buckets"))),
+        "state",
+    )
+    return os.path.join(state_dir, ".oauth_clients.json")
+
+
 class ChatGptOAuthProvider:
     def __init__(
         self,
@@ -588,6 +597,7 @@ class ChatGptOAuthProvider:
         redirect_prefix: str = DEFAULT_CHATGPT_OAUTH_REDIRECT_PREFIX,
         redirect_uris: list[str] | None = None,
         token_ttl_seconds: int = 30 * 24 * 60 * 60,
+        dynamic_clients_file: str = "",
     ) -> None:
         self.client_id = client_id.strip()
         self.client_secret = client_secret.strip()
@@ -606,7 +616,9 @@ class ChatGptOAuthProvider:
             if uri.strip()
         )
         self.token_ttl_seconds = token_ttl_seconds
-        self._codes: dict[str, tuple[str, float]] = {}
+        self.dynamic_clients_file = dynamic_clients_file
+        self._codes: dict[str, dict] = {}
+        self._dynamic_clients = self._load_dynamic_clients()
 
     @property
     def enabled(self) -> bool:
@@ -615,8 +627,113 @@ class ChatGptOAuthProvider:
     @property
     def token_auth_methods(self) -> list[str]:
         if self.client_secret:
-            return ["client_secret_post", "client_secret_basic"]
+            return ["none", "client_secret_post", "client_secret_basic"]
         return ["none"]
+
+    def _load_dynamic_clients(self) -> dict[str, dict]:
+        if not self.dynamic_clients_file:
+            return {}
+        try:
+            with open(self.dynamic_clients_file, "r", encoding="utf-8") as handle:
+                payload = _json_lib.load(handle)
+            clients = payload.get("clients", {}) if isinstance(payload, dict) else {}
+            return clients if isinstance(clients, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            logger.warning("Failed to load OAuth dynamic clients", exc_info=True)
+            return {}
+
+    def _save_dynamic_clients(self) -> None:
+        if not self.dynamic_clients_file:
+            return
+        directory = os.path.dirname(self.dynamic_clients_file)
+        os.makedirs(directory, exist_ok=True)
+        temp_path = f"{self.dynamic_clients_file}.{secrets.token_hex(6)}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            _json_lib.dump({"version": 1, "clients": self._dynamic_clients}, handle, indent=2)
+        os.replace(temp_path, self.dynamic_clients_file)
+
+    @staticmethod
+    def valid_dynamic_redirect_uri(redirect_uri: str) -> bool:
+        try:
+            parsed = urlparse(redirect_uri)
+            parsed.port
+        except (TypeError, ValueError):
+            return False
+        if parsed.fragment or not parsed.hostname or parsed.username or parsed.password:
+            return False
+        if parsed.scheme == "https":
+            return True
+        return parsed.scheme == "http" and parsed.hostname.lower() in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }
+
+    @staticmethod
+    def _redirect_matches(registered_uri: str, requested_uri: str) -> bool:
+        if hmac.compare_digest(registered_uri, requested_uri):
+            return True
+        try:
+            registered = urlparse(registered_uri)
+            requested = urlparse(requested_uri)
+        except Exception:
+            return False
+        loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+        if (
+            registered.hostname not in loopback_hosts
+            or requested.hostname != registered.hostname
+        ):
+            return False
+        return (
+            registered.scheme == requested.scheme == "http"
+            and registered.path == requested.path
+            and registered.params == requested.params
+            and registered.query == requested.query
+            and registered.fragment == requested.fragment == ""
+        )
+
+    def register_dynamic_client(self, metadata: dict) -> dict:
+        redirect_uris = metadata.get("redirect_uris")
+        if (
+            not isinstance(redirect_uris, list)
+            or not redirect_uris
+            or len(redirect_uris) > 10
+            or any(not isinstance(uri, str) or not self.valid_dynamic_redirect_uri(uri) for uri in redirect_uris)
+        ):
+            raise ValueError("invalid_redirect_uris")
+        auth_method = metadata.get("token_endpoint_auth_method", "none")
+        if auth_method != "none":
+            raise ValueError("invalid_client_metadata")
+        grant_types = metadata.get("grant_types", ["authorization_code", "refresh_token"])
+        response_types = metadata.get("response_types", ["code"])
+        if (
+            not isinstance(grant_types, list)
+            or not set(grant_types).issubset({"authorization_code", "refresh_token"})
+            or "authorization_code" not in grant_types
+            or response_types != ["code"]
+        ):
+            raise ValueError("invalid_client_metadata")
+        if len(self._dynamic_clients) >= 100:
+            oldest = min(
+                self._dynamic_clients,
+                key=lambda key: float(self._dynamic_clients[key].get("client_id_issued_at", 0)),
+            )
+            self._dynamic_clients.pop(oldest, None)
+        client_id = f"ombre_{secrets.token_urlsafe(24)}"
+        registered = {
+            "client_id": client_id,
+            "client_id_issued_at": int(time.time()),
+            "client_name": str(metadata.get("client_name") or "OAuth client")[:200],
+            "redirect_uris": redirect_uris,
+            "token_endpoint_auth_method": "none",
+            "grant_types": grant_types,
+            "response_types": ["code"],
+        }
+        self._dynamic_clients[client_id] = registered
+        self._save_dynamic_clients()
+        return registered
 
     def external_base(self, request=None) -> str:
         if self.public_base_url:
@@ -626,35 +743,83 @@ class ChatGptOAuthProvider:
         return ""
 
     def valid_client_id(self, client_id: str | None) -> bool:
-        return bool(client_id) and hmac.compare_digest(client_id, self.client_id)
+        return bool(client_id) and (
+            hmac.compare_digest(client_id, self.client_id)
+            or client_id in self._dynamic_clients
+        )
 
-    def valid_client_secret(self, client_secret: str | None) -> bool:
+    def is_dynamic_client(self, client_id: str | None) -> bool:
+        return bool(client_id) and client_id in self._dynamic_clients
+
+    def client_name(self, client_id: str | None) -> str:
+        if self.is_dynamic_client(client_id):
+            return str(self._dynamic_clients[client_id].get("client_name") or "OAuth client")
+        return "ChatGPT / Claude"
+
+    def valid_client_secret(self, client_id: str | None, client_secret: str | None) -> bool:
+        if self.is_dynamic_client(client_id):
+            return not client_secret
         if not self.client_secret:
             return True
         return bool(client_secret) and hmac.compare_digest(client_secret, self.client_secret)
 
-    def valid_redirect_uri(self, redirect_uri: str | None) -> bool:
-        return bool(redirect_uri) and (
-            bool(self.redirect_prefix and redirect_uri.startswith(self.redirect_prefix))
-            or redirect_uri in self.redirect_uris
-        )
+    def valid_redirect_uri(self, client_id: str | None, redirect_uri: str | None) -> bool:
+        if not redirect_uri:
+            return False
+        if self.is_dynamic_client(client_id):
+            return any(
+                self._redirect_matches(registered_uri, redirect_uri)
+                for registered_uri in self._dynamic_clients[client_id].get("redirect_uris", [])
+            )
+        return bool(self.redirect_prefix and redirect_uri.startswith(self.redirect_prefix)) or redirect_uri in self.redirect_uris
 
-    def create_authorization_code(self, redirect_uri: str) -> str:
+    def create_authorization_code(
+        self,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str = "",
+        code_challenge_method: str = "",
+    ) -> str:
         code = secrets.token_urlsafe(32)
-        self._codes[code] = (redirect_uri, time.time() + 300)
+        self._codes[code] = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+            "expires_at": time.time() + 300,
+        }
         return code
 
-    def consume_authorization_code(self, code: str | None, redirect_uri: str | None) -> bool:
+    def consume_authorization_code(
+        self,
+        code: str | None,
+        client_id: str | None,
+        redirect_uri: str | None,
+        code_verifier: str | None,
+    ) -> bool:
         if not code:
             return False
         entry = self._codes.pop(code, None)
         if not entry:
             return False
-        stored_redirect_uri, expires_at = entry
-        if time.time() > expires_at:
+        if time.time() > float(entry.get("expires_at", 0)):
             return False
-        if redirect_uri and redirect_uri != stored_redirect_uri:
+        if not client_id or not hmac.compare_digest(client_id, str(entry.get("client_id") or "")):
             return False
+        if not redirect_uri or not self._redirect_matches(str(entry.get("redirect_uri") or ""), redirect_uri):
+            return False
+        challenge = str(entry.get("code_challenge") or "")
+        if challenge:
+            if not code_verifier or not re.fullmatch(r"[A-Za-z0-9._~-]{43,128}", code_verifier):
+                return False
+            if entry.get("code_challenge_method") == "S256":
+                computed = urlsafe_b64encode(hashlib.sha256(code_verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+            elif entry.get("code_challenge_method") == "plain":
+                computed = code_verifier
+            else:
+                return False
+            if not hmac.compare_digest(challenge, computed):
+                return False
         return True
 
     def valid_access_token(self, token: str | None) -> bool:
@@ -681,6 +846,7 @@ OMBRE_CHATGPT_OAUTH = ChatGptOAuthProvider(
         )
     ),
     token_ttl_seconds=_int_env("OMBRE_CHATGPT_OAUTH_TOKEN_TTL_SECONDS", 30 * 24 * 60 * 60),
+    dynamic_clients_file=_oauth_clients_file(),
 )
 
 
@@ -701,11 +867,13 @@ def _oauth_public_path(path: str) -> bool:
     normalized = path.rstrip("/") or "/"
     return normalized in {
         "/oauth/authorize",
+        "/oauth/register",
         "/oauth/token",
         "/.well-known/oauth-authorization-server",
         "/.well-known/oauth-protected-resource",
         "/.well-known/openid-configuration",
         "/mcp/oauth/authorize",
+        "/mcp/oauth/register",
         "/mcp/oauth/token",
         "/mcp/.well-known/oauth-authorization-server",
         "/mcp/.well-known/oauth-protected-resource",
@@ -854,33 +1022,128 @@ def _dashboard_setup_needed() -> bool:
     return _load_dashboard_password_hash() is None
 
 
-@mcp.custom_route("/oauth/authorize", methods=["GET"])
-@mcp.custom_route("/mcp/oauth/authorize", methods=["GET"])
-async def chatgpt_oauth_authorize(request):
-    from starlette.responses import RedirectResponse
+@mcp.custom_route("/oauth/register", methods=["POST"])
+@mcp.custom_route("/mcp/oauth/register", methods=["POST"])
+async def oauth_dynamic_client_registration(request):
+    from starlette.responses import JSONResponse
 
     if not OMBRE_CHATGPT_OAUTH.enabled:
         return _oauth_error("oauth_not_configured", 404)
+    try:
+        metadata = await request.json()
+    except Exception:
+        return _oauth_error("invalid_client_metadata")
+    if not isinstance(metadata, dict):
+        return _oauth_error("invalid_client_metadata")
+    try:
+        registered = OMBRE_CHATGPT_OAUTH.register_dynamic_client(metadata)
+    except ValueError as exc:
+        return _oauth_error(str(exc))
+    return JSONResponse(registered, status_code=201, headers={"Cache-Control": "no-store"})
 
-    params = request.query_params
+
+def _oauth_redirect_response(
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    code_challenge: str,
+    code_challenge_method: str,
+    set_dashboard_session: bool = False,
+):
+    from starlette.responses import RedirectResponse
+
+    code = OMBRE_CHATGPT_OAUTH.create_authorization_code(
+        client_id,
+        redirect_uri,
+        code_challenge,
+        code_challenge_method,
+    )
+    query = {"code": code}
+    if state:
+        query["state"] = state
+    separator = "&" if "?" in redirect_uri else "?"
+    response = RedirectResponse(url=f"{redirect_uri}{separator}{urlencode(query)}", status_code=302)
+    if set_dashboard_session:
+        token = _create_dashboard_session()
+        response.set_cookie(
+            "ombre_session",
+            token,
+            httponly=True,
+            secure=OMBRE_CHATGPT_OAUTH.external_base().startswith("https://"),
+            samesite="lax",
+            max_age=86400 * 7,
+        )
+    return response
+
+
+def _oauth_approval_page(params: dict[str, str], error: str = ""):
+    from starlette.responses import HTMLResponse
+
+    hidden = "".join(
+        f'<input type="hidden" name="{html.escape(key)}" value="{html.escape(value, quote=True)}">'
+        for key, value in params.items()
+        if key != "password"
+    )
+    client_name = html.escape(OMBRE_CHATGPT_OAUTH.client_name(params.get("client_id")))
+    error_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
+    body = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>连接 Ombre Brain</title><style>
+body{{font-family:system-ui,sans-serif;background:#111827;color:#f9fafb;display:grid;place-items:center;min-height:100vh;margin:0}}
+main{{width:min(420px,calc(100% - 40px));background:#1f2937;border:1px solid #374151;border-radius:18px;padding:28px;box-shadow:0 20px 50px #0008}}
+h1{{font-size:22px;margin:0 0 12px}}p{{color:#d1d5db;line-height:1.55}}input,button{{box-sizing:border-box;width:100%;padding:12px 14px;border-radius:10px;font-size:16px}}
+input{{background:#111827;color:#fff;border:1px solid #4b5563;margin:8px 0 14px}}button{{border:0;background:#f3c4d7;color:#2b1220;font-weight:700;cursor:pointer}}.error{{color:#fca5a5}}
+</style></head><body><main><h1>连接 Ombre Brain</h1>
+<p><strong>{client_name}</strong> 请求访问你的记忆工具。请输入 Dashboard 密码确认；密码只在本次连接时校验。</p>
+{error_html}<form method="post">{hidden}<label for="password">Dashboard 密码</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+<button type="submit">允许连接</button></form></main></body></html>"""
+    return HTMLResponse(body, status_code=401 if error else 200, headers={"Cache-Control": "no-store"})
+
+
+@mcp.custom_route("/oauth/authorize", methods=["GET", "POST"])
+@mcp.custom_route("/mcp/oauth/authorize", methods=["GET", "POST"])
+async def chatgpt_oauth_authorize(request):
+    if not OMBRE_CHATGPT_OAUTH.enabled:
+        return _oauth_error("oauth_not_configured", 404)
+
+    params = await _oauth_form(request) if request.method == "POST" else dict(request.query_params)
     client_id = params.get("client_id")
     redirect_uri = params.get("redirect_uri")
     response_type = params.get("response_type")
-    state = params.get("state")
+    state = params.get("state") or ""
+    code_challenge = params.get("code_challenge") or ""
+    code_challenge_method = params.get("code_challenge_method") or ""
 
     if response_type != "code":
         return _oauth_error("unsupported_response_type")
     if not OMBRE_CHATGPT_OAUTH.valid_client_id(client_id):
         return _oauth_error("invalid_client", 401)
-    if not OMBRE_CHATGPT_OAUTH.valid_redirect_uri(redirect_uri):
+    if not OMBRE_CHATGPT_OAUTH.valid_redirect_uri(client_id, redirect_uri):
         return _oauth_error("invalid_redirect_uri")
-
-    code = OMBRE_CHATGPT_OAUTH.create_authorization_code(redirect_uri)
-    query = {"code": code}
-    if state:
-        query["state"] = state
-    separator = "&" if "?" in redirect_uri else "?"
-    return RedirectResponse(url=f"{redirect_uri}{separator}{urlencode(query)}", status_code=302)
+    if OMBRE_CHATGPT_OAUTH.is_dynamic_client(client_id):
+        if code_challenge_method != "S256" or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", code_challenge):
+            return _oauth_error("invalid_request")
+        if request.method == "POST":
+            if not _verify_dashboard_password(params.get("password") or ""):
+                return _oauth_approval_page(params, "密码不正确，请重试。")
+            return _oauth_redirect_response(
+                client_id,
+                redirect_uri,
+                state,
+                code_challenge,
+                code_challenge_method,
+                set_dashboard_session=True,
+            )
+        if not _dashboard_authenticated(request):
+            return _oauth_approval_page(params)
+    return _oauth_redirect_response(
+        client_id,
+        redirect_uri,
+        state,
+        code_challenge,
+        code_challenge_method,
+    )
 
 
 @mcp.custom_route("/oauth/token", methods=["POST"])
@@ -896,12 +1159,17 @@ async def chatgpt_oauth_token(request):
 
     if not OMBRE_CHATGPT_OAUTH.valid_client_id(client_id):
         return _oauth_error("invalid_client", 401)
-    if not OMBRE_CHATGPT_OAUTH.valid_client_secret(client_secret):
+    if not OMBRE_CHATGPT_OAUTH.valid_client_secret(client_id, client_secret):
         return _oauth_error("invalid_client", 401)
 
     grant_type = form.get("grant_type")
     if grant_type == "authorization_code":
-        if not OMBRE_CHATGPT_OAUTH.consume_authorization_code(form.get("code"), form.get("redirect_uri")):
+        if not OMBRE_CHATGPT_OAUTH.consume_authorization_code(
+            form.get("code"),
+            client_id,
+            form.get("redirect_uri"),
+            form.get("code_verifier"),
+        ):
             return _oauth_error("invalid_grant")
     elif grant_type == "refresh_token":
         if not OMBRE_CHATGPT_OAUTH.valid_refresh_token(form.get("refresh_token")):
@@ -918,10 +1186,12 @@ def _oauth_server_metadata(request) -> dict:
     return {
         "issuer": base,
         "authorization_endpoint": f"{base}/oauth/authorize",
+        "registration_endpoint": f"{base}/oauth/register",
         "token_endpoint": f"{base}/oauth/token",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": OMBRE_CHATGPT_OAUTH.token_auth_methods,
+        "code_challenge_methods_supported": ["S256"],
     }
 
 
