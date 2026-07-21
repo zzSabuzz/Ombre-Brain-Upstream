@@ -26,6 +26,7 @@
 # ============================================================
 
 import os
+import base64
 import math
 import logging
 import re
@@ -72,6 +73,9 @@ class BucketManager:
         self.dynamic_dir = os.path.join(self.base_dir, "dynamic")
         self.archive_dir = os.path.join(self.base_dir, "archive")
         self.feel_dir = os.path.join(self.base_dir, "feel")
+        self.plans_dir = os.path.join(self.base_dir, "plans")
+        self.letters_dir = os.path.join(self.base_dir, "letters")
+        self.self_dir = os.path.join(self.base_dir, "self")
         self.tombstone_dir = os.path.join(self.base_dir, ".tombstones")
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
         self.max_results = config.get("matching", {}).get("max_results", 5)
@@ -208,7 +212,13 @@ class BucketManager:
 
         # --- Choose directory by type + primary domain ---
         # --- 按类型 + 主题域选择存储目录 ---
-        if bucket_type == "permanent" or pinned:
+        if bucket_type == "plan":
+            type_dir = self.plans_dir
+        elif bucket_type == "letter":
+            type_dir = self.letters_dir
+        elif bucket_type == "i":
+            type_dir = self.self_dir
+        elif bucket_type == "permanent" or pinned:
             type_dir = self.permanent_dir
             if pinned and bucket_type != "permanent":
                 metadata["type"] = "permanent"
@@ -309,6 +319,10 @@ class BucketManager:
         # --- Update only fields that were passed in / 只改传入的字段 ---
         if "content" in kwargs:
             post.content = kwargs["content"]  # wikilink injection disabled; LLM adds [[]] via prompt
+            if post.get("type") == "letter":
+                post["verbatim_content_b64"] = base64.b64encode(
+                    str(kwargs["content"]).encode("utf-8")
+                ).decode("ascii")
         if "tags" in kwargs:
             post["tags"] = kwargs["tags"]
         if "facets" in kwargs:
@@ -393,14 +407,20 @@ class BucketManager:
         # --- Auto-move: pinned → permanent/ ---
         # --- 自动移动：钉选 → permanent/ ---
         domain = post.get("domain", ["未分类"])
-        if kwargs.get("pinned") and post.get("type") != "permanent":
+        if kwargs.get("pinned") and post.get("type") not in {"permanent", "plan", "letter", "i"}:
             post["type"] = "permanent"
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(frontmatter.dumps(post))
             self._move_bucket(file_path, self.permanent_dir, domain)
         elif "domain" in kwargs and post.get("type") != "feel":
             bucket_type = str(post.get("type") or "dynamic")
-            if bucket_type == "archived":
+            if bucket_type == "plan":
+                target_dir = self.plans_dir
+            elif bucket_type == "letter":
+                target_dir = self.letters_dir
+            elif bucket_type == "i":
+                target_dir = self.self_dir
+            elif bucket_type == "archived":
                 target_dir = self.archive_dir
             elif bucket_type == "permanent":
                 target_dir = self.permanent_dir
@@ -1265,7 +1285,7 @@ class BucketManager:
         """
         buckets = []
 
-        dirs = [self.permanent_dir, self.dynamic_dir, self.feel_dir]
+        dirs = [self.permanent_dir, self.dynamic_dir, self.feel_dir, self.plans_dir, self.letters_dir, self.self_dir]
         if include_archive:
             dirs.append(self.archive_dir)
 
@@ -1297,6 +1317,9 @@ class BucketManager:
             "dynamic_count": 0,
             "archive_count": 0,
             "feel_count": 0,
+            "plan_count": 0,
+            "letter_count": 0,
+            "i_count": 0,
             "total_size_kb": 0.0,
             "domains": {},
         }
@@ -1306,6 +1329,9 @@ class BucketManager:
             (self.dynamic_dir, "dynamic_count"),
             (self.archive_dir, "archive_count"),
             (self.feel_dir, "feel_count"),
+            (self.plans_dir, "plan_count"),
+            (self.letters_dir, "letter_count"),
+            (self.self_dir, "i_count"),
         ]:
             if not os.path.exists(subdir):
                 continue
@@ -1343,6 +1369,9 @@ class BucketManager:
         try:
             # Read once, get domain info and update type / 一次性读取
             post = frontmatter.load(file_path)
+            if str(post.get("type") or "").lower() in {"plan", "letter", "i"}:
+                logger.warning("Refusing to archive isolated special memory: %s", bucket_id)
+                return False
             domain = post.get("domain", ["未分类"])
             if not isinstance(domain, list):
                 domain = [domain]
@@ -1420,7 +1449,7 @@ class BucketManager:
         """
         if not bucket_id:
             return None
-        for dir_path in [self.permanent_dir, self.dynamic_dir, self.archive_dir, self.feel_dir]:
+        for dir_path in [self.permanent_dir, self.dynamic_dir, self.archive_dir, self.feel_dir, self.plans_dir, self.letters_dir, self.self_dir]:
             if not os.path.exists(dir_path):
                 continue
             for root, _, files in os.walk(dir_path):
@@ -1446,10 +1475,16 @@ class BucketManager:
         try:
             raw = Path(file_path).read_text(encoding="utf-8")
             post = frontmatter.load(file_path)
+            content = post.content
+            if post.get("type") == "letter" and post.get("verbatim_content_b64"):
+                try:
+                    content = base64.b64decode(str(post.get("verbatim_content_b64"))).decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    logger.warning("Invalid verbatim letter payload in %s", file_path)
             return {
                 "id": post.get("id", Path(file_path).stem),
                 "metadata": dict(post.metadata),
-                "content": post.content,
+                "content": content,
                 "path": file_path,
                 "content_start_line": _markdown_body_start_line(raw),
             }

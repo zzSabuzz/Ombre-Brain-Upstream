@@ -128,6 +128,16 @@ anchor:
 self_anchor:
   entry_bucket_id: ""
 
+# Durable plans are separate from scheduled reminders.
+# Conservative completion checks run after hold/grow and are disabled by default.
+plan:
+  auto_resolution:
+    enabled: false
+    vector_threshold: 0.70
+    confidence_threshold: 0.70
+    top_k: 8
+  # Env override: OMBRE_PLAN_AUTO_RESOLUTION_ENABLED=true|false
+
 # --- Decay parameters / 记忆衰减参数 ---
 # Simulates Ebbinghaus forgetting curve, auto-archives inactive memories
 # 模拟艾宾浩斯遗忘曲线，自动归档不活跃的记忆

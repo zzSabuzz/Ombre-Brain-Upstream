@@ -127,6 +127,7 @@ from recall_diagnostics import RecallDiagnosticsLogger
 from reminder_store import ReminderStore
 from reranker_engine import RerankerEngine
 from self_anchor import SELF_ANCHOR_TAG, is_self_anchor_bucket, is_self_anchor_metadata
+from special_memory import SpecialMemoryService, is_special_memory_metadata
 from scripts.migrate_affect_anchor_sections import plan_bucket_migration
 from source_refs import source_ref_window
 from word_map import WordMapStore, reflection_identity_terms
@@ -165,6 +166,21 @@ bucket_mgr = BucketManager(config)                  # Bucket manager / 记忆桶
 dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
+special_memory = SpecialMemoryService(config, bucket_mgr, embedding_engine, dehydrator, logger)
+
+
+def _is_special_memory_bucket(bucket: dict | None) -> bool:
+    return bool(bucket and is_special_memory_metadata(bucket.get("metadata", {})))
+
+
+def _schedule_plan_resolution_check(bucket_id: str, content: str) -> None:
+    async def runner() -> None:
+        try:
+            await special_memory.check_plan_resolution(bucket_id, content)
+        except Exception as exc:
+            logger.warning("Plan resolution task failed for %s: %s", bucket_id, exc)
+
+    asyncio.create_task(runner())
 reranker_engine = RerankerEngine(config)              # Reranker / 召回重排序
 recall_diagnostics = RecallDiagnosticsLogger(config)  # Recall diagnostics / 召回诊断
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
@@ -1209,7 +1225,7 @@ async def _read_breath_date(
     topic_terms = _breath_date_topic_terms(query)
     candidates = []
     for bucket in all_buckets:
-        if not isinstance(bucket, dict) or is_self_anchor_bucket(bucket):
+        if not isinstance(bucket, dict) or is_self_anchor_bucket(bucket) or _is_special_memory_bucket(bucket):
             continue
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         if meta.get("type") == "feel":
@@ -1331,7 +1347,7 @@ def _select_anchor_buckets(all_buckets: list[dict], limit: int = 2) -> list[dict
         and not is_self_anchor_bucket(b)
         and not b.get("metadata", {}).get("pinned")
         and not b.get("metadata", {}).get("protected")
-        and b.get("metadata", {}).get("type") not in {"permanent", "feel"}
+        and b.get("metadata", {}).get("type") not in {"permanent", "feel", "plan", "letter", "i"}
     ]
     anchors.sort(
         key=lambda b: (
@@ -1820,7 +1836,7 @@ def _format_handoff_recent_continuity(all_buckets: list[dict], limit: int = 3) -
     candidates = []
     cutoff_hours = 24 * 4
     for bucket in all_buckets:
-        if is_self_anchor_bucket(bucket):
+        if is_self_anchor_bucket(bucket) or _is_special_memory_bucket(bucket):
             continue
         meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
         if meta.get("pinned") or meta.get("protected") or meta.get("anchor"):
@@ -2992,7 +3008,7 @@ async def _refresh_entity_edges_for_bucket_id(bucket_id: str) -> int:
 
 
 def _refresh_entity_edges_for_bucket(bucket: dict | None) -> int:
-    if not bucket or is_self_anchor_bucket(bucket):
+    if not bucket or is_self_anchor_bucket(bucket) or _is_special_memory_bucket(bucket):
         return 0
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
     if meta.get("type") == "feel" or meta.get("protected"):
@@ -3166,7 +3182,7 @@ async def breath_hook(request):
         unresolved = [b for b in all_buckets
                       if not is_self_anchor_bucket(b)
                       and not b["metadata"].get("resolved", False)
-                      and b["metadata"].get("type") not in ("permanent", "feel")
+                      and b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "i")
                       and not b["metadata"].get("anchor", False)
                       and not b["metadata"].get("pinned")
                       and not b["metadata"].get("protected")]
@@ -3231,7 +3247,7 @@ async def dream_hook(request):
         all_buckets = await bucket_mgr.list_all(include_archive=False)
         candidates = [
             b for b in all_buckets
-            if b["metadata"].get("type") not in ("permanent", "feel")
+            if b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "i")
             and not b["metadata"].get("pinned", False)
             and not b["metadata"].get("protected", False)
         ]
@@ -3566,7 +3582,7 @@ async def _find_readonly_related_bucket(
         meta = bucket.get("metadata", {})
         if bucket.get("id") in exclude_ids:
             continue
-        if meta.get("type") == "feel":
+        if meta.get("type") == "feel" or is_special_memory_metadata(meta):
             continue
         ranked.append(bucket)
 
@@ -3582,7 +3598,7 @@ async def _find_readonly_related_bucket(
 
 def _bucket_needs_memory_enrichment(bucket: dict) -> bool:
     meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
-    if is_self_anchor_bucket(bucket):
+    if is_self_anchor_bucket(bucket) or _is_special_memory_bucket(bucket):
         return False
     if meta.get("type") == "feel" or meta.get("protected"):
         return False
@@ -3595,7 +3611,13 @@ def _bucket_needs_memory_enrichment(bucket: dict) -> bool:
 
 def _bucket_allows_memory_edge_backfill(bucket: dict) -> bool:
     meta = bucket.get("metadata", {}) if isinstance(bucket, dict) else {}
-    return bool(bucket and not is_self_anchor_bucket(bucket) and meta.get("type") != "feel" and not meta.get("protected"))
+    return bool(
+        bucket
+        and not is_self_anchor_bucket(bucket)
+        and not is_special_memory_metadata(meta)
+        and meta.get("type") != "feel"
+        and not meta.get("protected")
+    )
 
 
 async def _backfill_memory_enrichment(
@@ -3991,6 +4013,7 @@ async def _merge_or_create(
             bucket["metadata"].get("pinned")
             or bucket["metadata"].get("protected")
             or bucket["metadata"].get("type") == "feel"
+            or _is_special_memory_bucket(bucket)
             or _is_profile_fact_bucket(bucket)
         ):
             try:
@@ -4264,9 +4287,11 @@ def _moments_by_bucket(moments: list[dict]) -> dict[str, list[dict]]:
 def _is_breath_recall_seed_bucket(bucket: dict | None) -> bool:
     if not isinstance(bucket, dict):
         return False
-    if is_self_anchor_bucket(bucket):
+    if is_self_anchor_bucket(bucket) or _is_special_memory_bucket(bucket):
         return False
     meta = bucket.get("metadata", {}) if isinstance(bucket.get("metadata"), dict) else {}
+    if is_special_memory_metadata(meta):
+        return False
     if meta.get("type") != "feel":
         return True
     tags = {str(tag).lower() for tag in meta.get("tags", []) or []}
@@ -7190,7 +7215,7 @@ async def breath(
             b for b in all_buckets
             if not is_self_anchor_bucket(b)
             and not b["metadata"].get("resolved", False)
-            and b["metadata"].get("type") not in ("permanent", "feel")
+            and b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "i")
             and not b["metadata"].get("anchor", False)
             and not b["metadata"].get("pinned", False)
             and not b["metadata"].get("protected", False)
@@ -7369,7 +7394,7 @@ async def breath(
             if bucket_id not in matched_ids and sim_score >= recall_thresholds["vector_min_score"]:
                 bucket = await bucket_mgr.get(bucket_id)
                 if bucket:
-                    if bucket.get("metadata", {}).get("type") == "feel" or is_self_anchor_bucket(bucket):
+                    if bucket.get("metadata", {}).get("type") == "feel" or is_self_anchor_bucket(bucket) or _is_special_memory_bucket(bucket):
                         continue
                     bucket["score"] = round(sim_score * 100, 2)
                     bucket["vector_match"] = True
@@ -7864,7 +7889,7 @@ async def _select_resurface_buckets(
             continue
         if is_self_anchor_bucket(bucket):
             continue
-        if meta.get("type") in {"feel", "permanent"}:
+        if meta.get("type") in {"feel", "permanent", "plan", "letter", "i"}:
             continue
         if meta.get("pinned") or meta.get("protected"):
             continue
@@ -8300,6 +8325,7 @@ async def hold(
         )
         _queue_embedding_refresh(bucket_id)
         _queue_memory_enrichment(bucket_id)
+        _schedule_plan_resolution_check(bucket_id, content)
         related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
         return f"📌钉选→{bucket_id} {','.join(domain)}{related_note}"
 
@@ -8319,6 +8345,7 @@ async def hold(
         date=event_date,
     )
     _queue_memory_enrichment(bucket_id)
+    _schedule_plan_resolution_check(bucket_id, content)
 
     action = "合并→" if is_merged else "新建→"
     related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
@@ -8391,6 +8418,80 @@ async def darkroom_release(entry_id: str = "latest", reason: str = "") -> dict:
 # Tool 3: grow — Grow, fragments become memories
 # 工具 3：grow — 生长，一天的碎片长成记忆
 # =============================================================
+@mcp.tool()
+async def plan(
+    content: str,
+    status: str = "active",
+    related_bucket: str = "",
+    weight: float = 0.5,
+    why_remembered: str = "",
+) -> dict:
+    """Persist a durable commitment with an active/resolved/abandoned lifecycle; separate from reminders."""
+    try:
+        return await special_memory.plan(
+            content,
+            status=status,
+            related_bucket=related_bucket,
+            weight=weight,
+            why_remembered=why_remembered,
+        )
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+@mcp.tool()
+async def letter_write(
+    content: str,
+    author: str,
+    date: str = "",
+    title: str = "",
+    user_name: str = "",
+    ai_name: str = "",
+) -> dict:
+    """Store a letter verbatim with author/date metadata in the isolated letter archive."""
+    try:
+        return await special_memory.letter_write(
+            content,
+            author=author,
+            date=date,
+            title=title,
+            user_name=user_name,
+            ai_name=ai_name or _ai_author_name(),
+        )
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+@mcp.tool()
+async def letter_read(
+    query: str = "",
+    limit: int = 10,
+    author: str = "",
+    date_from: str = "",
+    date_to: str = "",
+) -> list[dict] | dict:
+    """Read complete letters, optionally filtered by author/date and ranked semantically."""
+    try:
+        return await special_memory.letter_read(
+            query=query,
+            author=author,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+        )
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+@mcp.tool(name="I")
+async def I_tool(content: str = "", aspect: str = "", read: bool = False, limit: int = 20) -> dict | list[dict]:
+    """Read or append isolated AI self-knowledge for a supported cognition aspect."""
+    try:
+        return await special_memory.I(content, aspect=aspect, read=read, limit=limit)
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+
+
 def _format_write_gate_result(decision: WriteGateDecision) -> str:
     reason = ",".join(decision.reasons) or "no_reason"
     repeat = f"{decision.repeat_count + 1}/{memory_write_gate.repeat_promote_count}"
@@ -8469,6 +8570,7 @@ async def _grow_direct_structured_content(content: str, title: str = "", gate_pr
     )
     _queue_embedding_refresh(bucket_id)
     _queue_memory_enrichment(bucket_id)
+    _schedule_plan_resolution_check(bucket_id, direct_content)
     related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
     return f"{gate_prefix}1条|新1合0\n📝{name or bucket_id}{related_note}"
 
@@ -8545,6 +8647,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
             memory_classification_source=fast_classification["memory_classification_source"],
         )
         _queue_memory_enrichment(bucket_id)
+        _schedule_plan_resolution_check(bucket_id, content)
         action = "合并" if is_merged else "新建"
         related_note = _format_readonly_related_memory(related_bucket) if related_bucket else ""
         return f"{gate_prefix}{action} → {result_name} | {','.join(analysis.get('domain', []))} V{analysis.get('valence', 0.5):.1f}/A{analysis.get('arousal', 0.3):.1f}{related_note}"
@@ -8597,6 +8700,7 @@ async def grow(content: str, auto: bool = False, source: str = "", title: str = 
                 memory_classification_source=item_classification["memory_classification_source"],
             )
             _queue_memory_enrichment(bucket_id)
+            _schedule_plan_resolution_check(bucket_id, item_content)
 
             if is_merged:
                 results.append(f"📎{result_name}")
@@ -8765,6 +8869,9 @@ async def trace(
     digested: int = -1,
     content: str = "",
     date: str = "",
+    status: str = "",
+    weight: float = -1,
+    why_remembered: str = "",
     delete: bool = False,
 ) -> str:
     """修改已有记忆，不创建新桶。tags/domain/content 是替换；date 可改事件日期；改前先 read_bucket。resolved/digested 让旧事沉底。只改元数据/date 不重建 embedding，改 content/name 才重建。"""
@@ -8785,6 +8892,36 @@ async def trace(
     bucket = await bucket_mgr.get(bucket_id)
     if not bucket:
         return f"未找到记忆桶: {bucket_id}"
+
+    meta = bucket.get("metadata", {})
+    if is_special_memory_metadata(meta) and (
+        pinned in (0, 1) or anchor in (0, 1) or digested in (0, 1) or importance != -1
+    ):
+        return "plan/letter/I 的隔离字段不可用 trace 改为 pinned、anchor、digested 或普通 importance。"
+    plan_fields_requested = (
+        bool(status.strip())
+        or 0 <= weight <= 1
+        or bool(why_remembered)
+        or (meta.get("type") == "plan" and resolved in (0, 1))
+    )
+    if meta.get("type") != "plan" and plan_fields_requested:
+        return "status/weight/why_remembered 只适用于 plan 桶。"
+    if meta.get("type") == "plan":
+        requested_status = status.strip().lower() or None
+        if requested_status is None and resolved in (0, 1):
+            requested_status = "resolved" if resolved == 1 else "active"
+            resolved = -1
+        if requested_status is not None or 0 <= weight <= 1 or why_remembered:
+            try:
+                bucket = await special_memory.update_plan(
+                    bucket_id,
+                    status=requested_status,
+                    weight=weight if 0 <= weight <= 1 else None,
+                    why_remembered=why_remembered if why_remembered else None,
+                    reason="trace",
+                )
+            except ValueError as exc:
+                return str(exc)
 
     # --- Collect only fields actually passed / 只收集用户实际传入的字段 ---
     updates = {}
@@ -8820,6 +8957,8 @@ async def trace(
     if event_date:
         updates["date"] = event_date
 
+    if not updates and plan_fields_requested:
+        return f"已修改 plan {bucket_id}: status/weight/why_remembered"
     if not updates:
         return "没有任何字段需要修改。"
 
@@ -8870,7 +9009,14 @@ async def pulse(include_archive: bool = False) -> str:
     except Exception as e:
         return f"获取系统状态失败: {e}"
 
-    active_count = stats["permanent_count"] + stats["dynamic_count"] + stats["feel_count"]
+    active_count = (
+        stats["permanent_count"]
+        + stats["dynamic_count"]
+        + stats["feel_count"]
+        + stats["plan_count"]
+        + stats["letter_count"]
+        + stats["i_count"]
+    )
     total_count = active_count + stats["archive_count"]
     visible_count = total_count if include_archive else active_count
     status = (
@@ -8878,6 +9024,9 @@ async def pulse(include_archive: bool = False) -> str:
         f"固化记忆桶: {stats['permanent_count']} 个\n"
         f"动态记忆桶: {stats['dynamic_count']} 个\n"
         f"情绪/印象桶: {stats['feel_count']} 个\n"
+        f"计划桶: {stats['plan_count']} 个\n"
+        f"信件桶: {stats['letter_count']} 个\n"
+        f"自我认知桶: {stats['i_count']} 个\n"
         f"归档记忆桶: {stats['archive_count']} 个\n"
         f"当前显示桶: {visible_count} 个\n"
         f"全量记忆桶: {total_count} 个\n"
@@ -8905,6 +9054,12 @@ async def pulse(include_archive: bool = False) -> str:
             icon = "📦"
         elif meta.get("type") == "feel":
             icon = "🫧"
+        elif meta.get("type") == "plan":
+            icon = "🗓️"
+        elif meta.get("type") == "letter":
+            icon = "✉️"
+        elif meta.get("type") == "i":
+            icon = "🪞"
         elif meta.get("type") == "archived":
             icon = "🗄️"
         elif meta.get("resolved", False):
@@ -8970,7 +9125,7 @@ async def introspection(
     # --- Filter: recent surface-level dynamic buckets (not permanent/pinned/feel) ---
     candidates = [
         b for b in all_buckets
-        if b["metadata"].get("type") not in ("permanent", "feel")
+        if b["metadata"].get("type") not in ("permanent", "feel", "plan", "letter", "i")
         and not b["metadata"].get("pinned", False)
         and not b["metadata"].get("protected", False)
     ]
