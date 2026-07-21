@@ -3943,7 +3943,9 @@ async def edge_backfill(
     )
 
 
-@mcp.tool()
+# Internal maintenance entry point. Keep it callable by server-side jobs, but do
+# not publish it as a ChatGPT action: the official client has no need to run an
+# entity-edge repair directly.
 async def entity_edge_backfill(
     limit: int = 25,
     bucket_id: str = "",
@@ -7972,7 +7974,8 @@ async def read_bucket(bucket_id: str) -> dict:
 # Tool 1.55: list_buckets_light — lightweight bucket index
 # 工具 1.55：list_buckets_light — 轻量桶索引
 # =============================================================
-@mcp.tool()
+# Internal sync/index helper. It remains available to in-process jobs while the
+# public MCP surface uses pulse/read_bucket for supported bucket discovery.
 async def list_buckets_light(
     include_archive: bool = False,
     limit: int = 500,
