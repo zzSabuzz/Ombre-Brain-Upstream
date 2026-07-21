@@ -489,6 +489,62 @@
     }
   }
 
+  .special-shell { max-width: 1040px; margin: 0 auto; }
+  .special-toolbar {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 18px; margin-bottom: 16px;
+  }
+  .special-title h2 {
+    margin: 0 0 4px; color: var(--accent);
+    font-family: 'Cormorant Garamond', serif; font-size: 28px;
+  }
+  .special-title p { margin: 0; color: var(--text-dim); font-size: 13px; max-width: 680px; }
+  .special-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+  .special-actions input, .special-actions select,
+  .special-form input, .special-form select, .special-form textarea,
+  .plan-inline input, .plan-inline select {
+    border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+    color: var(--text); font: inherit; font-size: 13px; padding: 9px 11px;
+  }
+  .special-actions button, .special-form button, .plan-inline button {
+    min-height: 36px; padding: 8px 14px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--surface-solid); color: var(--accent);
+    font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .special-form {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;
+    margin-bottom: 18px; padding: 16px; border: 1px solid var(--border);
+    border-radius: 10px; background: color-mix(in srgb, var(--surface) 82%, var(--bg));
+  }
+  .special-field { display: flex; flex-direction: column; gap: 6px; }
+  .special-field.full { grid-column: 1 / -1; }
+  .special-field label { color: var(--text-dim); font-size: 12px; }
+  .special-form textarea { min-height: 110px; resize: vertical; }
+  .special-form-footer { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+  .special-message { min-height: 18px; color: var(--text-dim); font-size: 12px; }
+  .special-message.error { color: var(--negative); }
+  .special-list { display: grid; gap: 12px; }
+  .special-card {
+    padding: 17px 19px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--surface); box-shadow: 3px 3px 10px var(--shadow-dark-subtle), -3px -3px 10px var(--shadow-light);
+  }
+  .special-card-head { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 9px; }
+  .special-card-title { color: var(--accent); font-weight: 600; }
+  .special-card-meta { color: var(--text-light); font-size: 12px; text-align: right; }
+  .special-card-body { white-space: pre-wrap; line-height: 1.72; font-size: 14px; }
+  .special-card-note { margin-top: 10px; color: var(--text-dim); font-size: 12px; white-space: pre-wrap; }
+  .special-pill { display: inline-block; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; }
+  .plan-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+  .plan-inline input { min-width: 210px; flex: 1; }
+  .plan-history { margin-top: 10px; color: var(--text-light); font-size: 11px; }
+  @media (max-width: 720px) {
+    .special-toolbar, .special-card-head { flex-direction: column; }
+    .special-actions { justify-content: flex-start; }
+    .special-form { grid-template-columns: 1fr; }
+    .special-field.full, .special-form-footer { grid-column: 1; }
+    .special-card-meta { text-align: left; }
+  }
+
   .bucket-list { display: flex; flex-direction: column; gap: 8px; }
   .bucket-row {
     display: grid;
@@ -2827,6 +2883,9 @@
 </div>
 
 <div class="tabs">
+  <div class="tab" data-tab="letters">信件</div>
+  <div class="tab" data-tab="self-knowledge">I · 自我认知</div>
+  <div class="tab" data-tab="plans">Plan</div>
   <div class="tab active" data-tab="list">记忆桶</div>
   <div class="tab" data-tab="todos">照顾备忘</div>
   <div class="tab" data-tab="breath">Breath 模拟</div>
@@ -2952,6 +3011,66 @@
     <div id="todo-list" class="todo-list">
       <div class="loading">打开照顾备忘页后加载清单。</div>
     </div>
+  </div>
+</div>
+
+<div class="content" id="letters-view" style="display:none">
+  <div class="special-shell">
+    <div class="special-toolbar">
+      <div class="special-title"><h2>信件</h2><p>完整原文独立保存，可按作者、日期和语义检索；不参与普通合并、压缩或衰减。</p></div>
+      <div class="special-actions">
+        <input id="letter-query" type="search" placeholder="搜索正文或标题" />
+        <input id="letter-author-filter" type="text" placeholder="作者（精确）" />
+        <button type="button" onclick="loadLetters()">搜索 / 刷新</button>
+      </div>
+    </div>
+    <form class="special-form" onsubmit="createLetter(event)">
+      <div class="special-field"><label for="letter-author">作者 *</label><input id="letter-author" required placeholder="user / AI / 名字" /></div>
+      <div class="special-field"><label for="letter-date">日期</label><input id="letter-date" type="date" /></div>
+      <div class="special-field full"><label for="letter-title">标题</label><input id="letter-title" /></div>
+      <div class="special-field full"><label for="letter-content">完整正文 *</label><textarea id="letter-content" required></textarea></div>
+      <div class="special-form-footer"><button type="submit">保存信件</button><span class="special-message" id="letter-message"></span></div>
+    </form>
+    <div class="special-list" id="letter-list"><div class="loading">打开信件页后加载。</div></div>
+  </div>
+</div>
+
+<div class="content" id="self-knowledge-view" style="display:none">
+  <div class="special-shell">
+    <div class="special-toolbar">
+      <div class="special-title"><h2>I · 自我认知</h2><p>AI 独立的 self-anchor 区域，不进入普通 Breath 或 Dream。</p></div>
+      <div class="special-actions">
+        <select id="i-aspect-filter" onchange="loadSelfKnowledge()"><option value="">全部维度</option><option value="nature">nature</option><option value="values">values</option><option value="patterns">patterns</option><option value="limits">limits</option><option value="becoming">becoming</option><option value="uncertainty">uncertainty</option><option value="stance">stance</option></select>
+        <button type="button" onclick="loadSelfKnowledge()">刷新</button>
+      </div>
+    </div>
+    <form class="special-form" onsubmit="createSelfKnowledge(event)">
+      <div class="special-field"><label for="i-aspect">维度 *</label><select id="i-aspect" required><option value="nature">nature</option><option value="values">values</option><option value="patterns">patterns</option><option value="limits">limits</option><option value="becoming">becoming</option><option value="uncertainty">uncertainty</option><option value="stance">stance</option></select></div>
+      <div class="special-field full"><label for="i-content">自我认知正文 *</label><textarea id="i-content" required></textarea></div>
+      <div class="special-form-footer"><button type="submit">写入 I</button><span class="special-message" id="i-message"></span></div>
+    </form>
+    <div class="special-list" id="i-list"><div class="loading">打开 I 页后加载。</div></div>
+  </div>
+</div>
+
+<div class="content" id="plans-view" style="display:none">
+  <div class="special-shell">
+    <div class="special-toolbar">
+      <div class="special-title"><h2>Plan</h2><p>持久承诺与 active / resolved / abandoned 生命周期；它不替代定时提醒。</p></div>
+      <div class="special-actions">
+        <select id="plan-status-filter" onchange="loadPlans()"><option value="active">active</option><option value="resolved">resolved</option><option value="abandoned">abandoned</option><option value="all">全部</option></select>
+        <button type="button" onclick="loadPlans()">刷新</button>
+      </div>
+    </div>
+    <form class="special-form" onsubmit="createPlan(event)">
+      <div class="special-field"><label for="plan-status">初始状态</label><select id="plan-status"><option value="active">active</option><option value="resolved">resolved</option><option value="abandoned">abandoned</option></select></div>
+      <div class="special-field"><label for="plan-weight">权重 0–1</label><input id="plan-weight" type="number" min="0" max="1" step="0.05" value="0.5" /></div>
+      <div class="special-field full"><label for="plan-content">承诺正文 *</label><textarea id="plan-content" required></textarea></div>
+      <div class="special-field"><label for="plan-why">为什么要记住</label><input id="plan-why" /></div>
+      <div class="special-field"><label for="plan-related">关联记忆桶 ID</label><input id="plan-related" /></div>
+      <div class="special-form-footer"><button type="submit">创建 Plan</button><span class="special-message" id="plan-message"></span></div>
+    </form>
+    <div class="special-list" id="plan-list"><div class="loading">打开 Plan 页后加载。</div></div>
   </div>
 </div>
 
@@ -3931,6 +4050,9 @@ document.querySelectorAll('.tab').forEach(tab => {
     const target = tab.dataset.tab;
     document.getElementById('list-view').style.display = target === 'list' ? '' : 'none';
     document.getElementById('todo-view').style.display = target === 'todos' ? '' : 'none';
+    document.getElementById('letters-view').style.display = target === 'letters' ? '' : 'none';
+    document.getElementById('self-knowledge-view').style.display = target === 'self-knowledge' ? '' : 'none';
+    document.getElementById('plans-view').style.display = target === 'plans' ? '' : 'none';
     document.getElementById('breath-view').style.display = target === 'breath' ? '' : 'none';
     document.getElementById('memory-config-view').style.display = target === 'memory-config' ? '' : 'none';
     document.getElementById('reflection-view').style.display = target === 'reflection' ? '' : 'none';
@@ -3945,6 +4067,9 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('model-config-view').style.display = target === 'model-config' ? '' : 'none';
     document.getElementById('import-view').style.display = target === 'import' ? '' : 'none';
     if (target === 'todos') loadTodos();
+    if (target === 'letters') loadLetters();
+    if (target === 'self-knowledge') loadSelfKnowledge();
+    if (target === 'plans') loadPlans();
     if (target === 'breath') loadGatewayInjections();
     if (target === 'memory-config') loadConfig();
     if (target === 'reflection') renderReflectionReview();
@@ -4287,6 +4412,155 @@ async function snoozeTodo(id, minutes) {
     var target = document.getElementById('todo-status');
     if (target) target.textContent = '稍后失败: ' + e.message;
   }
+}
+
+function specialMeta(item) {
+  return (item && item.metadata) || {};
+}
+
+function setSpecialMessage(id, text, isError) {
+  var node = document.getElementById(id);
+  if (!node) return;
+  node.textContent = text || '';
+  node.classList.toggle('error', Boolean(isError));
+}
+
+async function loadLetters() {
+  var list = document.getElementById('letter-list');
+  if (!list) return;
+  list.innerHTML = '<div class="loading">正在加载信件…</div>';
+  try {
+    var params = new URLSearchParams({type: 'letter', limit: '100'});
+    var query = document.getElementById('letter-query').value.trim();
+    var author = document.getElementById('letter-author-filter').value.trim();
+    if (query) params.set('query', query);
+    if (author) params.set('author', author);
+    var res = await authFetch(BASE + '/api/special-memory?' + params.toString());
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '加载失败');
+    if (!data.items.length) {
+      list.innerHTML = '<div class="loading">还没有符合条件的信件。</div>';
+      return;
+    }
+    list.innerHTML = data.items.map(function(item) {
+      var meta = specialMeta(item);
+      var title = meta.title || meta.name || ('来自 ' + (meta.author || '未知作者') + ' 的信');
+      var detail = [meta.author || '未知作者', meta.letter_date || meta.date || meta.created || '', item.id].filter(Boolean).join(' · ');
+      return '<article class="special-card"><div class="special-card-head"><div class="special-card-title">' + esc(title) + '</div><div class="special-card-meta">' + esc(detail) + '</div></div><div class="special-card-body">' + esc(item.content || '') + '</div></article>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="loading">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+async function createLetter(event) {
+  event.preventDefault();
+  setSpecialMessage('letter-message', '正在保存…');
+  try {
+    var payload = {
+      author: document.getElementById('letter-author').value,
+      date: document.getElementById('letter-date').value,
+      title: document.getElementById('letter-title').value,
+      content: document.getElementById('letter-content').value,
+    };
+    var res = await authFetch(BASE + '/api/special-memory/letter', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '保存失败');
+    document.getElementById('letter-title').value = '';
+    document.getElementById('letter-content').value = '';
+    setSpecialMessage('letter-message', '已保存：' + data.bucket_id);
+    await loadLetters();
+  } catch (e) { setSpecialMessage('letter-message', e.message, true); }
+}
+
+async function loadSelfKnowledge() {
+  var list = document.getElementById('i-list');
+  if (!list) return;
+  list.innerHTML = '<div class="loading">正在加载 I…</div>';
+  try {
+    var params = new URLSearchParams({type: 'i', limit: '100'});
+    var aspect = document.getElementById('i-aspect-filter').value;
+    if (aspect) params.set('aspect', aspect);
+    var res = await authFetch(BASE + '/api/special-memory?' + params.toString());
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '加载失败');
+    if (!data.items.length) { list.innerHTML = '<div class="loading">这个维度还没有自我认知条目。</div>'; return; }
+    list.innerHTML = data.items.map(function(item) {
+      var meta = specialMeta(item);
+      return '<article class="special-card"><div class="special-card-head"><div class="special-card-title"><span class="special-pill">' + esc(meta.aspect || '未分类') + '</span></div><div class="special-card-meta">' + esc([meta.created || '', item.id].filter(Boolean).join(' · ')) + '</div></div><div class="special-card-body">' + esc(item.content || '') + '</div></article>';
+    }).join('');
+  } catch (e) { list.innerHTML = '<div class="loading">加载失败：' + esc(e.message) + '</div>'; }
+}
+
+async function createSelfKnowledge(event) {
+  event.preventDefault();
+  setSpecialMessage('i-message', '正在写入…');
+  try {
+    var payload = {aspect: document.getElementById('i-aspect').value, content: document.getElementById('i-content').value};
+    var res = await authFetch(BASE + '/api/special-memory/i', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '写入失败');
+    document.getElementById('i-content').value = '';
+    setSpecialMessage('i-message', '已写入：' + data.bucket_id);
+    await loadSelfKnowledge();
+  } catch (e) { setSpecialMessage('i-message', e.message, true); }
+}
+
+async function loadPlans() {
+  var list = document.getElementById('plan-list');
+  if (!list) return;
+  list.innerHTML = '<div class="loading">正在加载 Plan…</div>';
+  try {
+    var status = document.getElementById('plan-status-filter').value;
+    var params = new URLSearchParams({type: 'plan', status: status, limit: '100'});
+    var res = await authFetch(BASE + '/api/special-memory?' + params.toString());
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '加载失败');
+    if (!data.items.length) { list.innerHTML = '<div class="loading">当前筛选下没有 Plan。</div>'; return; }
+    list.innerHTML = data.items.map(renderPlanCard).join('');
+  } catch (e) { list.innerHTML = '<div class="loading">加载失败：' + esc(e.message) + '</div>'; }
+}
+
+function renderPlanCard(item) {
+  var meta = specialMeta(item);
+  var id = String(item.id || '');
+  var history = Array.isArray(meta.change_log) ? meta.change_log : [];
+  var historyText = history.slice(-4).map(function(entry) {
+    return [entry.at || '', entry.field || '', String(entry.from == null ? '∅' : entry.from) + ' → ' + String(entry.to), entry.reason || ''].filter(Boolean).join(' · ');
+  }).join('\n');
+  var related = meta.related_bucket ? '关联：' + meta.related_bucket : '';
+  return '<article class="special-card"><div class="special-card-head"><div class="special-card-title"><span class="special-pill">' + esc(meta.status || 'active') + '</span> · weight ' + esc(String(meta.weight == null ? 0.5 : meta.weight)) + '</div><div class="special-card-meta">' + esc([meta.created || '', id].filter(Boolean).join(' · ')) + '</div></div><div class="special-card-body">' + esc(item.content || '') + '</div>' + (meta.why_remembered ? '<div class="special-card-note">为什么记住：' + esc(meta.why_remembered) + '</div>' : '') + (related ? '<div class="special-card-note">' + esc(related) + '</div>' : '') + '<div class="plan-inline"><select id="plan-state-' + escAttr(id) + '"><option value="active"' + (meta.status === 'active' ? ' selected' : '') + '>active</option><option value="resolved"' + (meta.status === 'resolved' ? ' selected' : '') + '>resolved</option><option value="abandoned"' + (meta.status === 'abandoned' ? ' selected' : '') + '>abandoned</option></select><input id="plan-why-' + escAttr(id) + '" value="' + escAttr(meta.why_remembered || '') + '" placeholder="为什么要记住" /><input id="plan-weight-' + escAttr(id) + '" type="number" min="0" max="1" step="0.05" value="' + escAttr(String(meta.weight == null ? 0.5 : meta.weight)) + '" /><button type="button" onclick="updatePlan(\'' + jsString(id) + '\')">更新</button></div>' + (historyText ? '<div class="plan-history">最近变更：\n' + esc(historyText) + '</div>' : '') + '</article>';
+}
+
+async function createPlan(event) {
+  event.preventDefault();
+  setSpecialMessage('plan-message', '正在创建…');
+  try {
+    var payload = {content: document.getElementById('plan-content').value, status: document.getElementById('plan-status').value, weight: Number(document.getElementById('plan-weight').value), why_remembered: document.getElementById('plan-why').value, related_bucket: document.getElementById('plan-related').value};
+    var res = await authFetch(BASE + '/api/special-memory/plan', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '创建失败');
+    document.getElementById('plan-content').value = '';
+    setSpecialMessage('plan-message', data.deduplicated ? '已有相同 active Plan：' + data.bucket_id : '已创建：' + data.bucket_id);
+    await loadPlans();
+  } catch (e) { setSpecialMessage('plan-message', e.message, true); }
+}
+
+async function updatePlan(id) {
+  try {
+    var payload = {status: document.getElementById('plan-state-' + id).value, weight: Number(document.getElementById('plan-weight-' + id).value), why_remembered: document.getElementById('plan-why-' + id).value};
+    var res = await authFetch(BASE + '/api/special-memory/plan/' + encodeURIComponent(id), {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    if (!res) return;
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || '更新失败');
+    await loadPlans();
+  } catch (e) { setSpecialMessage('plan-message', e.message, true); }
 }
 
 function formatDarkroomCompleteness(value) {
