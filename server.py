@@ -10748,6 +10748,166 @@ async def api_todo_writeback(request):
     )
 
 
+def _special_memory_dashboard_payload(bucket: dict) -> dict:
+    """Expose special-memory fields without changing their isolated storage rules."""
+    meta = bucket.get("metadata", {})
+    payload = _bucket_read_payload(bucket)
+    payload["metadata"].update({
+        key: meta.get(key)
+        for key in (
+            "author", "title", "letter_date", "user_name", "ai_name", "aspect",
+            "status", "weight", "why_remembered", "related_bucket", "change_log",
+            "resolved_by", "resolution_reason",
+        )
+        if key in meta
+    })
+    return payload
+
+
+@mcp.custom_route("/api/special-memory", methods=["GET"])
+async def api_special_memory_list(request):
+    """List letters, AI self-knowledge, or plans for the authenticated dashboard."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    kind = str(request.query_params.get("type") or "").strip().lower()
+    if kind not in {"letter", "i", "plan"}:
+        return JSONResponse({"error": "type must be letter, i, or plan"}, status_code=400)
+    try:
+        limit = _int_between(request.query_params.get("limit"), 50, 1, 100)
+        if kind == "letter":
+            items = await special_memory.letter_read(
+                query=str(request.query_params.get("query") or ""),
+                author=str(request.query_params.get("author") or ""),
+                date_from=str(request.query_params.get("date_from") or ""),
+                date_to=str(request.query_params.get("date_to") or ""),
+                limit=limit,
+            )
+        elif kind == "i":
+            items = await special_memory.I(
+                aspect=str(request.query_params.get("aspect") or ""),
+                read=True,
+                limit=limit,
+            )
+        else:
+            status = str(request.query_params.get("status") or "all").strip().lower()
+            if status not in {"all", "active", "resolved", "abandoned"}:
+                raise ValueError("status must be all, active, resolved, or abandoned")
+            items = [
+                item for item in await bucket_mgr.list_all(include_archive=True)
+                if item.get("metadata", {}).get("type") == "plan"
+                and (status == "all" or item.get("metadata", {}).get("status", "active") == status)
+            ]
+            items.sort(key=lambda item: str(item.get("metadata", {}).get("created", "")), reverse=True)
+            items = items[:limit]
+        return JSONResponse({
+            "type": kind,
+            "count": len(items),
+            "items": [_special_memory_dashboard_payload(item) for item in items],
+        })
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/special-memory/letter", methods=["POST"])
+async def api_special_memory_letter_create(request):
+    """Create a verbatim letter from the dashboard."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("json body must be an object")
+        result = await special_memory.letter_write(
+            body.get("content", ""),
+            author=body.get("author", ""),
+            date=body.get("date", ""),
+            title=body.get("title", ""),
+            user_name=body.get("user_name", ""),
+            ai_name=body.get("ai_name", "") or _ai_author_name(),
+        )
+        return JSONResponse({"status": "created", **result})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/special-memory/i", methods=["POST"])
+async def api_special_memory_i_create(request):
+    """Append one isolated AI self-knowledge entry from the dashboard."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("json body must be an object")
+        result = await special_memory.I(body.get("content", ""), aspect=body.get("aspect", ""))
+        return JSONResponse({"status": "created", **result})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/special-memory/plan", methods=["POST"])
+async def api_special_memory_plan_create(request):
+    """Create a durable plan from the dashboard."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("json body must be an object")
+        result = await special_memory.plan(
+            body.get("content", ""),
+            status=body.get("status", "active"),
+            related_bucket=body.get("related_bucket", ""),
+            weight=body.get("weight", 0.5),
+            why_remembered=body.get("why_remembered", ""),
+        )
+        return JSONResponse({"status": "created", **result})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@mcp.custom_route("/api/special-memory/plan/{plan_id}", methods=["PATCH"])
+async def api_special_memory_plan_update(request):
+    """Update plan lifecycle fields while retaining the plan change log."""
+    from starlette.responses import JSONResponse
+    err = _require_dashboard_auth(request)
+    if err:
+        return err
+    plan_id = str(request.path_params.get("plan_id") or "").strip()
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("json body must be an object")
+        bucket = await special_memory.update_plan(
+            plan_id,
+            status=body.get("status") if "status" in body else None,
+            weight=body.get("weight") if "weight" in body else None,
+            why_remembered=body.get("why_remembered") if "why_remembered" in body else None,
+            reason="dashboard",
+        )
+        return JSONResponse({"status": "updated", "plan": _special_memory_dashboard_payload(bucket)})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @mcp.custom_route("/api/reminders", methods=["GET"])
 async def api_reminders(request):
     """List standalone care memos."""
