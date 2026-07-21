@@ -871,6 +871,7 @@ def _oauth_public_path(path: str) -> bool:
         "/oauth/token",
         "/.well-known/oauth-authorization-server",
         "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
         "/.well-known/openid-configuration",
         "/mcp/oauth/authorize",
         "/mcp/oauth/register",
@@ -954,10 +955,20 @@ class OmbreChatGptOAuthMiddleware:
             return
 
         from starlette.responses import JSONResponse
+        base = self.provider.public_base_url
+        if not base:
+            scheme = str(scope.get("scheme") or "https")
+            host = headers.get("host", "")
+            base = f"{scheme}://{host}".rstrip("/")
         response = JSONResponse(
             {"error": "invalid_token"},
             status_code=401,
-            headers={"WWW-Authenticate": 'Bearer realm="Ombre Brain"'},
+            headers={
+                "WWW-Authenticate": (
+                    'Bearer realm="Ombre Brain", '
+                    f'resource_metadata="{base}/.well-known/oauth-protected-resource/mcp"'
+                )
+            },
         )
         await response(scope, receive, send)
 
@@ -1208,6 +1219,7 @@ async def chatgpt_oauth_metadata(request):
 
 
 @mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
+@mcp.custom_route("/.well-known/oauth-protected-resource/mcp", methods=["GET"])
 @mcp.custom_route("/mcp/.well-known/oauth-protected-resource", methods=["GET"])
 async def chatgpt_oauth_resource_metadata(request):
     from starlette.responses import JSONResponse
