@@ -32,7 +32,7 @@ from memory_moments import MemoryMomentStore
 from utils import load_config
 
 
-BUCKET_SUBDIRS = {"dynamic", "permanent", "archive", "feel"}
+BUCKET_SUBDIRS = {"dynamic", "permanent", "archive", "feel", "plans", "letters", "self"}
 TOMBSTONE_DIRNAME = ".tombstones"
 
 
